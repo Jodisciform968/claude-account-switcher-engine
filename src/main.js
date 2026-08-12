@@ -621,17 +621,23 @@ ipcMain.handle('update:check', async () => {
 
 ipcMain.handle('update:install', async _e => {
   if (!lastUpdate?.available) return { error: 'No update to install.' }
-  const got = await update.download(lastUpdate, p => {
-    if (win && !win.isDestroyed()) win.webContents.send('update:progress', p)
-  })
-  if (got.error) return got
-  staged = got
-  const res = await update.apply(staged)
-  if (res.error) return res
-  // The swap script waits for this process to exit before replacing the bundle.
-  isQuitting = true
-  setTimeout(() => app.quit(), 250)
-  return res
+  try {
+    const got = await update.download(lastUpdate, p => {
+      if (win && !win.isDestroyed()) win.webContents.send('update:progress', p)
+    })
+    if (got.error) return got
+    staged = got
+    const res = await update.apply(staged)
+    if (res.error) return res
+    // The swap script waits for this process to exit before replacing the bundle.
+    isQuitting = true
+    setTimeout(() => app.quit(), 250)
+    return res
+  } catch (e) {
+    // Without this the renderer's promise never settles and the sheet sits on
+    // "Downloading…" for ever, which is how the ReadableStream bug presented.
+    return { error: `Update failed: ${e.message}` }
+  }
 })
 
 ipcMain.handle('update:page', async () => shell.openExternal(update.RELEASES_PAGE))

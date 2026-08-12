@@ -145,12 +145,22 @@ async function download (info, onProgress) {
   const total = Number(res.headers.get('content-length')) || info.bytes || 0
   const out = fs.createWriteStream(zip)
   let seen = 0
-  for await (const chunk of res.body) {
-    seen += chunk.length
-    out.write(Buffer.from(chunk))
+
+  // A reader loop rather than `for await (… of res.body)`: this is Chromium's
+  // ReadableStream, which — unlike Node's — is not async-iterable, so the
+  // pleasant version throws. Backpressure is honoured explicitly too, or a
+  // 200 MB download accumulates in memory faster than the disk drains it.
+  const reader = res.body.getReader()
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    seen += value.length
+    if (!out.write(Buffer.from(value))) {
+      await new Promise(r => out.once('drain', r))
+    }
     if (onProgress && total) onProgress(Math.min(1, seen / total))
   }
-  await new Promise(r => out.end(r))
+  await new Promise((resolve, reject) => out.end(err => (err ? reject(err) : resolve())))
 
   const expected = (await getText(info.sha256Url)).trim().split(/\s+/)[0].toLowerCase()
   const actual = (await sha256(zip)).toLowerCase()
