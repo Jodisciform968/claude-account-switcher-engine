@@ -57,7 +57,15 @@ function readConfig () {
   return null
 }
 
-const DEFAULT_SETTINGS = { hotkey: 'Alt+Command+C', hotkeyEnabled: true, menuBar: true, hideDock: false }
+const DEFAULT_SETTINGS = {
+  hotkey: 'Alt+Command+C',
+  hotkeyEnabled: true,
+  menuBar: true,
+  hideDock: false,
+  // Off by default: reordering the list also reorders ⌘1–9, and with two
+  // accounts the order would flip on every switch.
+  sortByRecent: false
+}
 
 function readRaw () {
   try { return JSON.parse(fs.readFileSync(CONF, 'utf8')) } catch { return {} }
@@ -78,6 +86,24 @@ function writeConfig (accounts, settings) {
   const tmp = `${CONF}.tmp`
   fs.writeFileSync(tmp, JSON.stringify(next, null, 2))
   fs.renameSync(tmp, CONF)
+}
+
+/**
+ * Recency order, when it is switched on. V8's sort is stable, so accounts that
+ * have never been opened keep their configured order at the bottom.
+ */
+function sortAccounts (list) {
+  if (!readSettings().sortByRecent) return list
+  return [...list].sort((a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0))
+}
+
+/** Stamp an account as just used. Activating a running one counts. */
+function touchAccount (id) {
+  const accounts = currentAccounts()
+  const a = accounts.find(x => x.id === id)
+  if (!a) return
+  a.lastUsedAt = Date.now()
+  writeConfig(accounts)
 }
 
 /** Profiles present on disk that the config does not know about yet. */
@@ -144,6 +170,8 @@ async function decorate (accounts) {
 // ---------------------------------------------------------------- launching ---
 
 async function launchAccount (account) {
+  touchAccount(account.id)
+
   if (await isRunning(account.dir)) {
     // Two instances on one profile corrupt its LevelDB stores. macOS cannot
     // raise a specific instance of a bundle, so this fronts the current one.
@@ -207,7 +235,7 @@ ipcMain.handle('accounts:list', async () => {
   return {
     needsSetup: false,
     discovered: [],
-    accounts: stored.map(a => ({ ...a, isDefault: a.dir === DEFAULT_PROFILE })),
+    accounts: sortAccounts(stored).map(a => ({ ...a, isDefault: a.dir === DEFAULT_PROFILE })),
     chromeProfiles: chrome.listProfiles()
   }
 })
@@ -239,21 +267,46 @@ ipcMain.handle('accounts:add', async (_e, name) => {
   writeConfig(accounts)
   fitWindow()
   tray.refresh()
-  return { accounts: await decorate(accounts) }
+  return { accounts: sortAccounts(await decorate(accounts)) }
 })
 
-ipcMain.handle('accounts:rename', async (_e, { id, name }) => {
+// Name, emoji and colour move together, because they are edited together.
+// Each field is optional; only what is present is touched.
+ipcMain.handle('accounts:update', async (_e, { id, name, emoji, hue }) => {
   const accounts = currentAccounts()
-  name = (name || '').trim()
-  if (!name) return { error: 'Name cannot be empty.' }
-  if (accounts.some(a => a.id !== id && a.name.toLowerCase() === name.toLowerCase())) {
-    return { error: 'An account with that name already exists.' }
-  }
   const a = accounts.find(x => x.id === id)
-  if (a) a.name = name
+  if (!a) return { error: 'Account not found.' }
+
+  if (name !== undefined) {
+    name = (name || '').trim()
+    if (!name) return { error: 'Name cannot be empty.' }
+    if (accounts.some(x => x.id !== id && x.name.toLowerCase() === name.toLowerCase())) {
+      return { error: 'An account with that name already exists.' }
+    }
+    a.name = name
+  }
+
+  if (emoji !== undefined) {
+    // Bounded rather than validated against a list: a ZWJ sequence is many code
+    // points, and there is no reason to refuse one the picker does not offer.
+    const e = String(emoji || '').trim().slice(0, 16)
+    if (e) a.emoji = e
+    else delete a.emoji
+  }
+
+  if (hue !== undefined) {
+    // null is "derive it from the name" and must not survive Number(), which
+    // would quietly turn it into hue 0 — red.
+    const h = hue === null ? NaN : Number(hue)
+    if (Number.isFinite(h)) a.hue = ((Math.round(h) % 360) + 360) % 360
+    else delete a.hue
+  }
+
   writeConfig(accounts)
   tray.refresh()
-  return { accounts: await decorate(accounts) }
+  // Deliberately not decorate(): its lsof probes would put two seconds between
+  // pressing Save and seeing the new name. The renderer keeps the status it has.
+  return { accounts: sortAccounts(accounts).map(x => ({ ...x, isDefault: x.dir === DEFAULT_PROFILE })) }
 })
 
 ipcMain.handle('accounts:remove', async (_e, { id, deleteData }) => {
@@ -288,7 +341,7 @@ ipcMain.handle('accounts:remove', async (_e, { id, deleteData }) => {
   writeConfig(next)
   fitWindow()
   tray.refresh()
-  return { accounts: await decorate(next) }
+  return { accounts: sortAccounts(await decorate(next)) }
 })
 
 ipcMain.handle('accounts:launch', async (_e, id) => {
@@ -350,6 +403,13 @@ ipcMain.handle('settings:setPresentation', async (_e, { menuBar, hideDock }) => 
   return { menuBar: next.menuBar, hideDock: next.hideDock }
 })
 
+ipcMain.handle('settings:setSorting', async (_e, sortByRecent) => {
+  const on = Boolean(sortByRecent)
+  writeConfig(null, { ...readSettings(), sortByRecent: on })
+  tray.refresh()
+  return { sortByRecent: on }
+})
+
 ipcMain.handle('settings:setLoginItem', async (_e, enabled) => {
   app.setLoginItemSettings({
     openAtLogin: Boolean(enabled),
@@ -387,7 +447,7 @@ ipcMain.handle('chrome:pair', async (_e, { accountId, dir, openOnLaunch }) => {
   if (dir) a.chrome = { dir, openOnLaunch: openOnLaunch !== false }
   else delete a.chrome
   writeConfig(accounts)
-  return { accounts: await decorate(accounts) }
+  return { accounts: sortAccounts(await decorate(accounts)) }
 })
 
 ipcMain.handle('chrome:open', async (_e, dir) => chrome.launch(dir))
@@ -449,7 +509,8 @@ function openWindow () {
 
 const TRAY_DEPS = {
   getState: async () => ({
-    accounts: await decorate(currentAccounts()),
+    // Same order as the picker, so the menu and ⌘1–9 never disagree.
+    accounts: sortAccounts(await decorate(currentAccounts())),
     issues: lastIssueCount
   }),
   onLaunch: async id => {

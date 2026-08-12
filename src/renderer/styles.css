@@ -615,3 +615,75 @@ body {
 
 .switch.on { background: var(--accent); }
 .switch.on::after { transform: translateX(16px); }
+
+
+/* ------------------------------------------------------- account identity --- */
+
+/* An emoji is a glyph, not a monogram: it needs the room and none of the
+   letter-spacing that keeps two initials legible. */
+.avatar.emoji {
+  font-size: 17px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
+.edit-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 2px 4px;
+}
+
+.edit-hint { color: var(--muted); font-size: 11px; }
+
+.field { padding: 8px 2px 2px; }
+.field + .field { border-top: 1px solid var(--border); margin-top: 6px; }
+
+.field-label {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 7px;
+}
+
+/* Fixed eight, not auto-fill: the modal has one width, and both palettes are
+   sized to fill their rows exactly rather than leave an orphan cell. */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 5px;
+}
+
+.cell {
+  -webkit-app-region: no-drag;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color .12s ease, transform .08s ease;
+}
+
+.cell:hover { border-color: var(--border-strong); }
+.cell:active { transform: scale(.94); }
+
+.cell.letters { font-size: 11px; font-weight: 650; letter-spacing: .02em; color: var(--muted); }
+.cell.filled { border-color: transparent; }
+/* The "automatic" swatch carries the hashed colour, so it needs light type. */
+.cell.filled.auto { font-size: 11px; font-weight: 650; color: #fff; }
+
+/* An inset ring rather than an outline: a filled swatch has no background of
+   its own to show a border against. */
+.cell.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 2px var(--panel), 0 0 0 2px var(--accent);
+}

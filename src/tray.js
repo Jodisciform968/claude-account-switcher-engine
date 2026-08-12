@@ -21,7 +21,7 @@ async function buildMenu () {
   const { accounts, issues } = await deps.getState()
 
   const items = accounts.map(a => ({
-    label: a.running ? `${a.name}  ●` : a.name,
+    label: (a.emoji ? `${a.emoji}  ` : '') + (a.running ? `${a.name}  ●` : a.name),
     // A checkmark would imply a selection; the dot just marks what is open.
     click: () => deps.onLaunch(a.id)
   }))

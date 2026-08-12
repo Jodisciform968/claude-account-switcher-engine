@@ -78,16 +78,34 @@ the machine that can say "quit *Personal*, leave *Work* alone".
 
 ---
 
-## Phase 2 — Make each account recognisable
+## Phase 2 — Make each account recognisable ✅ partly shipped
 
 Right now an account is a name and a hash-derived colour.
 
 | # | Item | Effort | Confidence |
 |---|---|---|---|
-| 2.1 | **Custom colour and emoji** per account | S | Verified |
-| 2.2 | **Last-used timestamp**, sort by recency | S | Verified |
+| 2.1 | **Custom colour and emoji** per account — ✅ shipped | S | Verified |
+| 2.2 | **Last-used timestamp**, sort by recency — ✅ shipped | S | Verified |
 | 2.3 | **Usage / plan meter** per account | M | Research |
 | 2.4 | **Show the signed-in identity** rather than a label you typed | M | Research |
+
+**2.1 and 2.2 shipped together**, since they are the same question — how do you
+tell two accounts apart at a glance. The pencil button now opens one **Edit**
+sheet carrying the name, an icon and a colour, all previewed live; the hue is
+picked from a fixed palette while saturation and lightness stay put, so white
+type on the avatar is always legible. Leaving either on **Automatic** keeps the
+old behaviour: initials, coloured by hashing the name.
+
+**Recency sorting is off by default**, and that is a deliberate call rather than
+caution — with two accounts, sorting by recency flips the order on every single
+switch, and it takes `⌘1`/`⌘2` with it. Muscle memory is worth more than the
+sort. The setting exists for people running five or six.
+
+Two things surfaced while building it. `Number(null)` is `0`, so "no colour"
+round-tripped into hue 0 — red — until the null was checked before the coercion.
+And returning `decorate()`d accounts from the save handler put its `lsof` probes
+(~2s) between pressing Save and seeing the new name, so the update path now
+returns the stored list and the renderer keeps the status it already has.
 
 **2.3** — each profile carries `plan-usage-history.json` (281 KB in the main
 profile), so the data is right there. Unknown: its schema and whether it is
@@ -278,5 +296,9 @@ Recorded so they don't get proposed again.
    for a fraction of 3.4's risk.
 4. **2.1 + 2.2** — accounts become recognisable at a glance.
 5. Run the Phase 2–4 research tests, then decide what survives.
+
+Steps 1–4 are done. **Next up is step 5**: 2.3 and 2.4 both hinge on a test that
+has not been run, and 4.3 on another. Run those three before scheduling any of
+them — the roadmap is not a queue where research items are concerned.
 
 Phases 6 and 7 only if this stops being a personal tool.

@@ -11,18 +11,26 @@ Click the Dock icon, pick an account, Claude opens signed in as that account.
 ┌────────────────────────────────────────┐
 │              CASE                      │
 │                                        │
-│   WO   Work                    ●   ⌘1  │
+│   💼   Work                    ●   ⌘1  │
 │        Running · 29 sessions           │
 │                                        │
 │   PE   Personal                    ⌘2  │
-│        3 sessions · Chrome: Personal   │
+│        2h ago · 3 sessions · Chrome    │
 │                                        │
 │   + Add account          ⚙   ⛨ Sessions│
 └────────────────────────────────────────┘
 ```
 
-`●` marks an account that is already open. Hovering a card reveals rename,
-Chrome pairing, reveal-in-Finder, quit and remove.
+`●` marks an account that is already open. Hovering a card reveals edit, Chrome
+pairing, reveal-in-Finder, quit and remove.
+
+Each account can carry its own **icon and colour** — the pencil button opens an
+Edit sheet with the name, an emoji and a palette, previewed as you pick. Leave
+either on *Automatic* and you get initials over a colour hashed from the name.
+Accounts also remember when you last opened them; **Settings → Sort by most
+recently used** moves the last one you used to the top, taking `⌘1`–`⌘9` with
+it. That is off by default, because with two accounts the order would flip on
+every switch.
 
 ## Install
 

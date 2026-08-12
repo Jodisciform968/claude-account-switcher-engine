@@ -45,7 +45,27 @@ function avatarColor (name) {
   return `hsl(${h} 52% 46%)`
 }
 
+const hueColor = h => `hsl(${h} 52% 46%)`
+
+/** A picked hue wins; otherwise the name still decides, as it always did. */
+function accountColor (a) {
+  return Number.isFinite(a.hue) ? hueColor(a.hue) : avatarColor(a.name)
+}
+
+const accountBadge = a => a.emoji || initials(a.name)
+
 function plural (n, word) { return `${n} ${word}${n === 1 ? '' : 's'}` }
+
+/** Coarse on purpose: "when did I last use this" needs no more than this. */
+function fmtAgo (ms) {
+  const mins = (Date.now() - ms) / 60000
+  if (!(mins >= 0)) return null
+  if (mins < 2) return 'just now'
+  if (mins < 60) return `${Math.round(mins)}m ago`
+  if (mins < 60 * 24) return `${Math.round(mins / 60)}h ago`
+  if (mins < 60 * 24 * 7) return `${Math.round(mins / 1440)}d ago`
+  return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
 
 let selectedIndex = 0
 let chromeProfiles = []
@@ -150,6 +170,125 @@ function choiceModal ({ title, note = '', buttons }) {
   })
 }
 
+// Fifteen each, so both grids fill exactly two rows of eight next to their
+// "automatic" cell. Saturation and lightness stay fixed — only the hue is
+// yours to pick, which keeps every avatar legible with white type on it.
+const HUES = [8, 24, 40, 56, 88, 112, 145, 168, 186, 202, 220, 246, 272, 300, 330]
+const EMOJI = ['💼', '🏠', '🧪', '🚀', '🐙', '🎯', '🔒', '🧠',
+               '⚡', '🌙', '☕', '🦊', '🍋', '🛠', '🎨']
+
+/**
+ * Name, icon and colour in one sheet. Resolves to the changed fields, or null
+ * if cancelled. Everything is previewed live, since the three combine.
+ */
+function editModal (a) {
+  return new Promise(resolve => {
+    modal.title.textContent = 'Edit account'
+    modal.note.textContent = 'Only the label changes. Nothing on disk moves.'
+    modal.note.hidden = false
+    modal.input.hidden = false
+    modal.input.value = a.name
+    modal.list.hidden = false
+    modal.list.innerHTML = ''
+    modal.error.hidden = true
+    modal.actions.innerHTML = ''
+    window.api.ensureHeight(470)
+
+    let emoji = a.emoji || null
+    let hue = Number.isFinite(a.hue) ? a.hue : null
+
+    const cell = (content, { tip, className = '' } = {}) => {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.className = `cell ${className}`.trim()
+      b.textContent = content
+      if (tip) b.dataset.tip = tip
+      return b
+    }
+
+    const field = (label, cells) => {
+      const wrap = document.createElement('div')
+      wrap.className = 'field'
+      wrap.innerHTML = `<div class="field-label">${esc(label)}</div>`
+      const grid = document.createElement('div')
+      grid.className = 'grid'
+      grid.append(...cells)
+      wrap.append(grid)
+      modal.list.append(wrap)
+    }
+
+    // --- live preview ------------------------------------------------------
+    const head = document.createElement('div')
+    head.className = 'edit-head'
+    head.innerHTML = '<div class="avatar"></div><div class="edit-hint">Shown on the card and in the menu bar.</div>'
+    const preview = head.querySelector('.avatar')
+    modal.list.append(head)
+
+    // --- icon --------------------------------------------------------------
+    const noEmoji = cell('Aa', { tip: 'Use the initials', className: 'letters' })
+    const emojiCells = EMOJI.map(e => cell(e, { className: 'glyph' }))
+    const allEmoji = [noEmoji, ...emojiCells]
+    field('Icon', allEmoji)
+
+    // --- colour ------------------------------------------------------------
+    const autoHue = cell('A', { tip: 'Automatic — derived from the name', className: 'filled auto' })
+    const hueCells = HUES.map(() => cell('', { className: 'filled' }))
+    hueCells.forEach((c, i) => { c.style.background = hueColor(HUES[i]) })
+    field('Colour', [autoHue, ...hueCells])
+
+    function paint () {
+      const name = modal.input.value.trim() || a.name
+      preview.textContent = emoji || initials(name)
+      preview.classList.toggle('emoji', Boolean(emoji))
+      preview.style.background = hue === null ? avatarColor(name) : hueColor(hue)
+      // The automatic swatch has to track the name as it is typed, or it stops
+      // being a preview of what "automatic" means.
+      autoHue.style.background = avatarColor(name)
+
+      noEmoji.classList.toggle('selected', emoji === null)
+      emojiCells.forEach((c, i) => c.classList.toggle('selected', EMOJI[i] === emoji))
+      autoHue.classList.toggle('selected', hue === null)
+      hueCells.forEach((c, i) => c.classList.toggle('selected', HUES[i] === hue))
+    }
+
+    noEmoji.onclick = () => { emoji = null; paint() }
+    emojiCells.forEach((c, i) => { c.onclick = () => { emoji = EMOJI[i]; paint() } })
+    autoHue.onclick = () => { hue = null; paint() }
+    hueCells.forEach((c, i) => { c.onclick = () => { hue = HUES[i]; paint() } })
+
+    const submit = () => {
+      const name = modal.input.value.trim()
+      if (!name) return done(null)
+      done({ name, emoji: emoji || '', hue })
+    }
+
+    const done = v => { cleanup(); resolve(v) }
+    const onKey = e => {
+      if (e.key === 'Escape') done(null)
+      if (e.key === 'Enter' && document.activeElement === modal.input) submit()
+    }
+    function cleanup () {
+      modal.input.removeEventListener('input', paint)
+      document.removeEventListener('keydown', onKey)
+      closeModal()
+    }
+
+    const cancel = Object.assign(document.createElement('button'), { className: 'btn ghost', textContent: 'Cancel' })
+    const save = Object.assign(document.createElement('button'), { className: 'btn primary', textContent: 'Save' })
+    cancel.onclick = () => done(null)
+    save.onclick = submit
+    modal.actions.append(cancel, save)
+
+    modal.input.addEventListener('input', paint)
+    document.addEventListener('keydown', onKey)
+
+    paint()
+    modal.root.hidden = false
+    modal.input.focus()
+    modal.input.select()
+  })
+}
+
 // ----------------------------------------------------------------- picker ---
 
 function subtitle (a) {
@@ -159,11 +298,14 @@ function subtitle (a) {
   }
   if (!a.exists) return 'Profile folder is missing — it will be recreated'
   const bits = []
+  // "Running" already answers "when did you last use this", so they never
+  // both appear — the subtitle has no room to spare.
   if (a.running) bits.push('Running')
+  else if (a.lastUsedAt) bits.push(fmtAgo(a.lastUsedAt))
   bits.push(plural(a.sessions, 'session'))
   if (a.isDefault) bits.push('default')
   if (a.chrome?.dir) bits.push(`Chrome: ${chromeName(a.chrome.dir)}`)
-  return bits.join(' · ')
+  return bits.filter(Boolean).join(' · ')
 }
 
 function renderPicker () {
@@ -175,7 +317,7 @@ function renderPicker () {
     const card = document.createElement('div')
     card.className = 'card clickable'
     card.innerHTML = `
-      <div class="avatar">${esc(initials(a.name))}</div>
+      <div class="avatar${a.emoji ? ' emoji' : ''}">${esc(accountBadge(a))}</div>
       <div class="card-body">
         <div class="card-name">${esc(a.name)}${a.running ? '<span class="dot"></span>' : ''}</div>
         <div class="card-sub">${esc(subtitle(a))}</div>
@@ -184,8 +326,8 @@ function renderPicker () {
       <div class="card-actions">
         ${a.running ? `<button class="iconbtn" data-act="quit" aria-label="Quit"
                 data-tip="Quit only this account, leaving the others running">${svg('power')}</button>` : ''}
-        <button class="iconbtn" data-act="rename" aria-label="Rename"
-                data-tip="Rename this account. Only the label changes.">${svg('pencil')}</button>
+        <button class="iconbtn" data-act="edit" aria-label="Edit"
+                data-tip="Rename it, or give it an icon and a colour">${svg('pencil')}</button>
         <button class="iconbtn" data-act="chrome" aria-label="Chrome profile"
                 data-tip="${a.chrome?.dir ? `Opens Chrome “${esc(chromeName(a.chrome.dir))}” with this account` : 'Pair a Chrome profile to open alongside this account'}">${svg('globe')}</button>
         <button class="iconbtn" data-act="reveal" aria-label="Show in Finder"
@@ -195,11 +337,11 @@ function renderPicker () {
       </div>`
 
     // Set via CSSOM, not a style attribute: the strict CSP blocks inline styles.
-    card.querySelector('.avatar').style.background = avatarColor(a.name)
+    card.querySelector('.avatar').style.background = accountColor(a)
 
     card.addEventListener('click', async e => {
       const act = e.target.closest('[data-act]')?.dataset.act
-      if (act === 'rename') return doRename(a)
+      if (act === 'edit') return doEdit(a)
       if (act === 'quit') return doQuit(a)
       if (act === 'chrome') return doChrome(a)
       if (act === 'reveal') return window.api.reveal(a.id)
@@ -246,17 +388,21 @@ async function doLaunch (a) {
   setTimeout(() => window.api.dismiss(), 350)
 }
 
-async function doRename (a) {
-  const name = await promptModal({
-    title: 'Rename account',
-    note: 'Only the label changes. Nothing on disk moves.',
-    value: a.name,
-    ok: 'Rename'
+/** Fold a fresh config list into what we already probed, so nothing flickers. */
+function mergeStatus (next) {
+  const by = new Map(accounts.map(a => [a.id, a]))
+  return next.map(a => {
+    const old = by.get(a.id)
+    return old ? { running: old.running, sessions: old.sessions, exists: old.exists, ...a } : a
   })
-  if (!name || name === a.name) return
-  const res = await window.api.rename(a.id, name)
+}
+
+async function doEdit (a) {
+  const edit = await editModal(a)
+  if (!edit) return
+  const res = await window.api.update(a.id, edit)
   if (res.error) return showBanner(res.error)
-  accounts = res.accounts
+  accounts = mergeStatus(res.accounts)
   renderPicker()
 }
 
@@ -935,6 +1081,16 @@ async function openSettings () {
 
   dockSwitch.disabled = !st.menuBar
   dockSwitch.style.opacity = st.menuBar ? '' : '.4'
+
+  // --- ordering ------------------------------------------------------------
+  mkSwitch('Sort by most recently used',
+    'The account you opened last moves to the top — and ⌘1–9 move with it.',
+    st.sortByRecent,
+    async (on, sw) => {
+      const res = await window.api.setSorting(on)
+      sw.classList.toggle('on', res.sortByRecent)
+      await refresh()          // reorder the list behind the sheet, immediately
+    })
 
   const done = Object.assign(document.createElement('button'), { className: 'btn primary', textContent: 'Done' })
   done.onclick = () => { stopRecording(); closeModal() }
