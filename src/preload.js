@@ -1,0 +1,38 @@
+'use strict'
+
+const { contextBridge, ipcRenderer } = require('electron')
+
+contextBridge.exposeInMainWorld('api', {
+  list: () => ipcRenderer.invoke('accounts:list'),
+  status: () => ipcRenderer.invoke('accounts:status'),
+  adopt: picked => ipcRenderer.invoke('accounts:adopt', picked),
+  add: name => ipcRenderer.invoke('accounts:add', name),
+  rename: (id, name) => ipcRenderer.invoke('accounts:rename', { id, name }),
+  remove: (id, deleteData) => ipcRenderer.invoke('accounts:remove', { id, deleteData }),
+  launch: id => ipcRenderer.invoke('accounts:launch', id),
+  reveal: id => ipcRenderer.invoke('accounts:reveal', id),
+  hide: () => ipcRenderer.invoke('app:hide'),
+  dismiss: () => ipcRenderer.invoke('app:dismiss'),
+  ensureHeight: min => ipcRenderer.invoke('app:ensureHeight', min),
+  fitWindow: () => ipcRenderer.invoke('app:fitWindow'),
+  extraHeight: px => ipcRenderer.invoke('app:extraHeight', px),
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  setHotkey: (hotkey, enabled) => ipcRenderer.invoke('settings:setHotkey', { hotkey, enabled }),
+  setLoginItem: enabled => ipcRenderer.invoke('settings:setLoginItem', enabled),
+  setPresentation: (menuBar, hideDock) => ipcRenderer.invoke('settings:setPresentation', { menuBar, hideDock }),
+  onShowSettings: cb => ipcRenderer.on('settings:show', () => cb()),
+  dockStatus: () => ipcRenderer.invoke('dock:status'),
+  dockPin: () => ipcRenderer.invoke('dock:pin'),
+  quitAccount: id => ipcRenderer.invoke('accounts:quit', id),
+  chromeList: accountId => ipcRenderer.invoke('chrome:list', accountId),
+  chromePair: (accountId, dir, openOnLaunch) => ipcRenderer.invoke('chrome:pair', { accountId, dir, openOnLaunch }),
+  chromeOpen: dir => ipcRenderer.invoke('chrome:open', dir),
+  chromeExtension: dir => ipcRenderer.invoke('chrome:extension', dir),
+  chromeNewProfile: () => ipcRenderer.invoke('chrome:newProfile'),
+  scanHealth: () => ipcRenderer.invoke('health:scan'),
+  onHealthUpdate: cb => ipcRenderer.on('health:update', (_e, data) => cb(data)),
+  onShowHealth: cb => ipcRenderer.on('health:show', () => cb()),
+  rebuildSession: (accountId, orphan) => ipcRenderer.invoke('health:rebuild', { accountId, orphan }),
+  revealPath: target => ipcRenderer.invoke('health:reveal', target),
+  claudeInstalled: () => ipcRenderer.invoke('app:claudeInstalled')
+})

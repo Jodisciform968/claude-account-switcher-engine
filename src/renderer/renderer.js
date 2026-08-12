@@ -1,0 +1,949 @@
+'use strict'
+
+const $ = sel => document.querySelector(sel)
+
+const views = { setup: $('#setup'), picker: $('#picker'), health: $('#health') }
+const banner = $('#banner')
+
+let accounts = []
+let refreshTimer = null
+
+// ------------------------------------------------------------------ utils ---
+
+const ICONS = {
+  pencil: 'M11.5 2.5a1.4 1.4 0 0 1 2 2L6 12l-2.6.6L4 10z',
+  folder: 'M2 4.2c0-.6.4-1 1-1h3l1.2 1.4H13c.6 0 1 .4 1 1v6c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1z',
+  trash: 'M3.5 4.5h9m-7 0V3.2c0-.4.3-.7.7-.7h3.6c.4 0 .7.3.7.7v1.3m-6.6 0 .5 8c0 .4.4.8.8.8h4.6c.4 0 .8-.4.8-.8l.5-8',
+  check: 'M3.5 8.5l3 3 6-6',
+  restore: 'M3.2 8a4.8 4.8 0 1 0 1.6-3.6M3 3v2.6h2.6',
+  globe: 'M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2m0 0c-1.7 1.6-2.6 3.6-2.6 6S6.3 12.4 8 14m0-12c1.7 1.6 2.6 3.6 2.6 6S9.7 12.4 8 14M2.4 6.2h11.2M2.4 9.8h11.2',
+  power: 'M8 2.4v4.4M5 4.5a4.4 4.4 0 1 0 6 0'
+}
+
+function svg (key, filled = false) {
+  return `<svg viewBox="0 0 16 16" class="icon" aria-hidden="true">
+    <path d="${ICONS[key]}" fill="${filled ? 'currentColor' : 'none'}"
+          stroke="currentColor" stroke-width="1.4"
+          stroke-linecap="round" stroke-linejoin="round"/></svg>`
+}
+
+function esc (s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+function initials (name) {
+  const parts = name.trim().split(/[\s\-_]+/).filter(Boolean)
+  if (!parts.length) return '?'
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
+  return (parts[0][0] + parts[1][0]).toUpperCase()
+}
+
+function avatarColor (name) {
+  let h = 0
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360
+  return `hsl(${h} 52% 46%)`
+}
+
+function plural (n, word) { return `${n} ${word}${n === 1 ? '' : 's'}` }
+
+let selectedIndex = 0
+let chromeProfiles = []
+const chromeName = dir => chromeProfiles.find(p => p.dir === dir)?.name || dir
+
+function showBanner (msg) {
+  banner.textContent = msg
+  banner.hidden = false
+  setTimeout(() => { banner.hidden = true }, 6000)
+}
+
+function show (name) {
+  for (const [k, el] of Object.entries(views)) el.hidden = k !== name
+}
+
+// ------------------------------------------------------------------ modal ---
+
+const modal = {
+  root: $('#modal'),
+  title: $('#modal-title'),
+  note: $('#modal-note'),
+  input: $('#modal-input'),
+  list: $('#modal-list'),
+  error: $('#modal-error'),
+  actions: document.querySelector('.modal-actions')
+}
+
+function closeModal () {
+  window.api.fitWindow()
+  modal.root.hidden = true
+  modal.error.hidden = true
+  modal.list.hidden = true
+  modal.list.innerHTML = ''
+}
+
+/** Text prompt. Resolves to the trimmed string, or null if cancelled. */
+function promptModal ({ title, note = '', value = '', placeholder = '', ok = 'Save' }) {
+  return new Promise(resolve => {
+    modal.title.textContent = title
+    modal.note.textContent = note
+    modal.note.hidden = !note
+    modal.input.hidden = false
+    modal.list.hidden = true
+    modal.input.value = value
+    modal.input.placeholder = placeholder
+    modal.error.hidden = true
+    modal.actions.innerHTML = ''
+
+    const cancel = Object.assign(document.createElement('button'), { className: 'btn ghost', textContent: 'Cancel' })
+    const confirm = Object.assign(document.createElement('button'), { className: 'btn primary', textContent: ok })
+    modal.actions.append(cancel, confirm)
+
+    const done = v => { cleanup(); resolve(v) }
+    const onKey = e => {
+      if (e.key === 'Escape') done(null)
+      if (e.key === 'Enter') done(modal.input.value.trim() || null)
+    }
+    function cleanup () {
+      closeModal()
+      document.removeEventListener('keydown', onKey)
+    }
+
+    cancel.onclick = () => done(null)
+    confirm.onclick = () => done(modal.input.value.trim() || null)
+    document.addEventListener('keydown', onKey)
+
+    modal.root.hidden = false
+    modal.input.focus()
+    modal.input.select()
+  })
+}
+
+/** Button choice. Resolves to the index of the button pressed, or -1. */
+function choiceModal ({ title, note = '', buttons }) {
+  return new Promise(resolve => {
+    modal.title.textContent = title
+    modal.note.textContent = note
+    modal.note.hidden = !note
+    modal.input.hidden = true
+    modal.list.hidden = true
+    modal.error.hidden = true
+    modal.actions.innerHTML = ''
+
+    const done = i => { closeModal(); document.removeEventListener('keydown', onKey); resolve(i) }
+    const onKey = e => { if (e.key === 'Escape') done(-1) }
+
+    const cancel = Object.assign(document.createElement('button'), { className: 'btn ghost', textContent: 'Cancel' })
+    cancel.onclick = () => done(-1)
+    modal.actions.append(cancel)
+
+    buttons.forEach((label, i) => {
+      const b = Object.assign(document.createElement('button'), {
+        className: 'btn ' + (i === buttons.length - 1 ? 'primary' : 'ghost'),
+        textContent: label
+      })
+      b.onclick = () => done(i)
+      modal.actions.append(b)
+    })
+
+    document.addEventListener('keydown', onKey)
+    modal.root.hidden = false
+  })
+}
+
+// ----------------------------------------------------------------- picker ---
+
+function subtitle (a) {
+  // Status arrives after the first paint, so fall back to something stable.
+  if (a.running === undefined) {
+    return a.dir.replace(/^.*Application Support\//, '') + (a.isDefault ? ' · default' : '')
+  }
+  if (!a.exists) return 'Profile folder is missing — it will be recreated'
+  const bits = []
+  if (a.running) bits.push('Running')
+  bits.push(plural(a.sessions, 'session'))
+  if (a.isDefault) bits.push('default')
+  if (a.chrome?.dir) bits.push(`Chrome: ${chromeName(a.chrome.dir)}`)
+  return bits.join(' · ')
+}
+
+function renderPicker () {
+  const list = $('#accounts')
+  list.innerHTML = ''
+  $('#empty').hidden = accounts.length > 0
+
+  accounts.forEach((a, idx) => {
+    const card = document.createElement('div')
+    card.className = 'card clickable'
+    card.innerHTML = `
+      <div class="avatar">${esc(initials(a.name))}</div>
+      <div class="card-body">
+        <div class="card-name">${esc(a.name)}${a.running ? '<span class="dot"></span>' : ''}</div>
+        <div class="card-sub">${esc(subtitle(a))}</div>
+      </div>
+      ${idx < 9 ? `<span class="num">\u2318${idx + 1}</span>` : ''}
+      <div class="card-actions">
+        ${a.running ? `<button class="iconbtn" data-act="quit" aria-label="Quit"
+                data-tip="Quit only this account, leaving the others running">${svg('power')}</button>` : ''}
+        <button class="iconbtn" data-act="rename" aria-label="Rename"
+                data-tip="Rename this account. Only the label changes.">${svg('pencil')}</button>
+        <button class="iconbtn" data-act="chrome" aria-label="Chrome profile"
+                data-tip="${a.chrome?.dir ? `Opens Chrome “${esc(chromeName(a.chrome.dir))}” with this account` : 'Pair a Chrome profile to open alongside this account'}">${svg('globe')}</button>
+        <button class="iconbtn" data-act="reveal" aria-label="Show in Finder"
+                data-tip="Show this account’s profile folder in Finder">${svg('folder')}</button>
+        <button class="iconbtn danger" data-act="remove" aria-label="Remove"
+                data-tip="Remove from this list, or delete the profile and its data">${svg('trash')}</button>
+      </div>`
+
+    // Set via CSSOM, not a style attribute: the strict CSP blocks inline styles.
+    card.querySelector('.avatar').style.background = avatarColor(a.name)
+
+    card.addEventListener('click', async e => {
+      const act = e.target.closest('[data-act]')?.dataset.act
+      if (act === 'rename') return doRename(a)
+      if (act === 'quit') return doQuit(a)
+      if (act === 'chrome') return doChrome(a)
+      if (act === 'reveal') return window.api.reveal(a.id)
+      if (act === 'remove') return doRemove(a)
+      await doLaunch(a)
+    })
+
+    if (idx === selectedIndex) card.classList.add('focused')
+    list.append(card)
+  })
+}
+
+async function refresh () {
+  const res = await window.api.list()
+  if (res.needsSetup) { renderSetup(res.discovered); show('setup'); return }
+  accounts = res.accounts
+  chromeProfiles = res.chromeProfiles || []
+  renderPicker()
+  show('picker')
+  await pullStatus()
+}
+
+/** Fold in running state and session counts once the probes come back. */
+async function pullStatus () {
+  const status = await window.api.status()
+  const by = new Map(status.map(s => [s.id, s]))
+  let changed = false
+  accounts = accounts.map(a => {
+    const s = by.get(a.id)
+    if (!s) return a
+    if (a.running !== s.running || a.sessions !== s.sessions || a.exists !== s.exists) changed = true
+    return { ...a, ...s }
+  })
+  if (changed) renderPicker()
+}
+
+// ---------------------------------------------------------------- actions ---
+
+async function doLaunch (a) {
+  const res = await window.api.launch(a.id)
+  if (res?.error) return showBanner(res.error)
+  if (!res?.ok) return showBanner(`Could not launch Claude for “${a.name}”.`)
+  // Get out of the way, but stay running so the next pick is instant.
+  setTimeout(() => window.api.dismiss(), 350)
+}
+
+async function doRename (a) {
+  const name = await promptModal({
+    title: 'Rename account',
+    note: 'Only the label changes. Nothing on disk moves.',
+    value: a.name,
+    ok: 'Rename'
+  })
+  if (!name || name === a.name) return
+  const res = await window.api.rename(a.id, name)
+  if (res.error) return showBanner(res.error)
+  accounts = res.accounts
+  renderPicker()
+}
+
+async function doRemove (a) {
+  const choice = await choiceModal({
+    title: `Remove “${a.name}”?`,
+    note: a.isDefault
+      ? 'This is Claude’s own profile, so its data cannot be deleted — it can only leave this list.'
+      : `The profile holds ${plural(a.sessions, 'session')} and its signed-in account.`,
+    buttons: a.isDefault
+      ? ['Remove from list']
+      : ['Remove from list', 'Delete everything…']
+  })
+  if (choice < 0) return
+
+  const deleteData = !a.isDefault && choice === 1
+  const res = await window.api.remove(a.id, deleteData)
+  if (res.cancelled) return
+  if (res.error) return showBanner(res.error)
+  accounts = res.accounts
+  renderPicker()
+}
+
+async function doAdd () {
+  const name = await promptModal({
+    title: 'Add account',
+    note: 'A fresh profile is created and Claude opens at the login screen.',
+    placeholder: 'Work',
+    ok: 'Create'
+  })
+  if (!name) return
+  const res = await window.api.add(name)
+  if (res.error) return showBanner(res.error)
+  accounts = res.accounts
+  renderPicker()
+  const created = accounts.find(x => x.name === name)
+  if (created) await doLaunch(created)
+}
+
+// ------------------------------------------------------------------ setup ---
+
+let discovered = []
+
+function renderSetup (found) {
+  discovered = found.map(f => ({ ...f, selected: true }))
+  const list = $('#discovered')
+  list.innerHTML = ''
+  $('#setup-empty').hidden = discovered.length > 0
+
+  discovered.forEach((d, i) => {
+    const card = document.createElement('div')
+    card.className = 'card selected clickable'
+    card.innerHTML = `
+      <div class="check">${svg('check')}</div>
+      <div class="card-body">
+        <input class="name-input" value="${esc(d.name)}" spellcheck="false">
+        <div class="card-sub">${esc(d.dir.replace(/^.*Application Support/, '…'))}</div>
+      </div>`
+
+    const input = card.querySelector('.name-input')
+    input.addEventListener('click', e => e.stopPropagation())
+    input.addEventListener('input', () => { discovered[i].name = input.value })
+
+    card.addEventListener('click', () => {
+      discovered[i].selected = !discovered[i].selected
+      card.classList.toggle('selected', discovered[i].selected)
+    })
+
+    list.append(card)
+  })
+}
+
+async function finishSetup (picked) {
+  accounts = await window.api.adopt(picked)
+  renderPicker()
+  show('picker')
+}
+
+// -------------------------------------------------------------------- init ---
+
+$('#add').addEventListener('click', doAdd)
+
+$('#setup-continue').addEventListener('click', () => {
+  const picked = discovered
+    .filter(d => d.selected && d.name.trim())
+    .map(d => ({ name: d.name.trim(), dir: d.dir }))
+  finishSetup(picked)
+})
+
+$('#setup-skip').addEventListener('click', () => finishSetup([]))
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && modal.root.hidden) window.api.hide()
+})
+
+;(async () => {
+  if (!(await window.api.claudeInstalled())) {
+    showBanner('Claude is not installed in /Applications — accounts cannot be launched.')
+  }
+  await refresh()
+  // Keep the running indicators honest while the window is open.
+  refreshTimer = setInterval(() => {
+    if (!modal.root.hidden || views.picker.hidden) return
+    pullStatus()
+  }, 2500)
+})()
+
+
+// ---------------------------------------------------------- session health ---
+
+const fmtWhen = ms => {
+  const d = new Date(ms)
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' +
+         d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+}
+const fmtMB = b => (b / 1048576).toFixed(1) + ' MB'
+
+let healthData = null
+
+function issueCount (data) {
+  // A resolved failure is history, not a problem to act on.
+  return data.accounts.reduce((n, a) =>
+    n + a.orphans.length + (a.failures && !a.failures.resolved ? 1 : 0), 0)
+}
+
+function paintBadge (data) {
+  const badge = $('#health-badge')
+  const n = issueCount(data)
+  badge.hidden = n === 0
+  badge.textContent = String(n)
+}
+
+function renderHealth () {
+  const body = $('#health-body')
+  body.innerHTML = ''
+
+  for (const a of healthData.accounts) {
+    const group = document.createElement('section')
+    group.className = 'health-group'
+
+    const head = document.createElement('div')
+    head.className = 'health-head'
+    head.innerHTML = `<span class="name">${esc(a.name)}</span>
+      <span class="meta">${a.backups.count
+        ? esc(plural(a.backups.count, 'index backup'))
+        : 'no index backups yet'}</span>`
+    if (a.backups.count) {
+      const b = document.createElement('button')
+      b.className = 'link'
+      b.textContent = 'Show'
+      b.onclick = () => window.api.revealPath(a.backups.dir)
+      head.append(b)
+    }
+    group.append(head)
+
+    if (a.failures && !a.failures.resolved) {
+      const warn = document.createElement('div')
+      warn.className = 'note warn'
+      warn.innerHTML = `<strong>${esc(String(a.failures.count))} failed session saves — still failing.</strong>
+        Last at ${esc(a.failures.last)}. Until this is fixed, sessions live only in memory
+        and vanish when Claude restarts. Cause: ${esc(a.failures.reason ? a.failures.reason.slice(0, 120) : 'unknown')}`
+      group.append(warn)
+    } else if (a.failures) {
+      const past = document.createElement('div')
+      past.className = 'note'
+      past.innerHTML = `<strong>${esc(String(a.failures.count))} failed saves earlier</strong>, last at
+        ${esc(a.failures.last)}. The index is writable again, so this is history — but any
+        session lost back then shows up below.`
+      group.append(past)
+    }
+
+    for (const o of a.orphans) {
+      const card = document.createElement('div')
+      card.className = 'card orphan'
+      card.innerHTML = `
+        <div class="card-body">
+          <div class="card-name">${esc(o.title)}</div>
+          <div class="card-sub">${esc(fmtMB(o.bytes))} · last active ${esc(fmtWhen(o.lastActivityAt))}</div>
+          <div class="path">${esc(o.cwd || 'unknown folder')}</div>
+        </div>`
+
+      const btn = document.createElement('button')
+      btn.className = 'btn primary'
+      btn.textContent = 'Restore'
+      btn.dataset.tip = 'Rebuild the index entry Claude lost, so this session is listed again'
+      btn.onclick = async () => {
+        btn.disabled = true
+        btn.textContent = 'Restoring…'
+        const res = await window.api.rebuildSession(a.id, o)
+        if (res.error) {
+          btn.disabled = false
+          btn.textContent = 'Restore'
+          return showBanner(res.error)
+        }
+        card.classList.add('restored')
+        btn.textContent = 'Restored'
+        showBanner('')
+        $('#banner').hidden = true
+      }
+      card.append(btn)
+      group.append(card)
+    }
+
+    if (!a.failures && !a.orphans.length) {
+      const ok = document.createElement('div')
+      ok.className = 'note ok'
+      ok.textContent = !a.logExists
+        ? 'No log for this account yet — open it once and rescan.'
+        : a.storage.ok
+          ? 'Index is writable. No failed saves, no sessions missing from the list.'
+          : `Index problem: ${a.storage.reason}.`
+      group.append(ok)
+    }
+
+    body.append(group)
+  }
+
+  if (healthData.accounts.some(a => a.orphans.length)) {
+    const hint = document.createElement('div')
+    hint.className = 'note'
+    hint.innerHTML = `Restoring rebuilds the entry Claude lost. The conversation
+      itself was never gone — Claude Code keeps transcripts outside the profile.
+      <strong>Restart the account</strong> afterwards for it to show up.`
+    body.append(hint)
+  }
+}
+
+async function openHealth () {
+  healthData = await window.api.scanHealth()
+  paintBadge(healthData)
+  renderHealth()
+  show('health')
+}
+
+$('#health-open').addEventListener('click', openHealth)
+$('#health-refresh').addEventListener('click', openHealth)
+$('#health-back').addEventListener('click', () => show('picker'))
+
+// The main process owns the periodic scan and pushes results here, so the badge
+// stays honest whether or not this window happens to be open.
+window.api.onHealthUpdate(data => {
+  healthData = data
+  paintBadge(data)
+  if (!views.health.hidden) renderHealth()
+})
+
+// Raised by clicking the notification.
+window.api.onShowHealth(() => {
+  if (healthData) { renderHealth(); show('health') } else openHealth()
+})
+
+// The window can finish loading after the first background tick, so seed once.
+;(async () => {
+  try {
+    healthData = await window.api.scanHealth()
+    paintBadge(healthData)
+  } catch {}
+})()
+
+
+// ------------------------------------------------------------------ chrome ---
+
+/**
+ * Pick one row from a list. Rows are built by the caller so each modal can show
+ * whatever detail matters — here, which Chrome profile has the extension.
+ */
+function listModal ({ title, note = '', rows, selected = null, ok = 'Save', extra = null }) {
+  return new Promise(resolve => {
+    modal.title.textContent = title
+    modal.note.textContent = note
+    modal.note.hidden = !note
+    modal.input.hidden = true
+    modal.error.hidden = true
+    modal.list.hidden = false
+    modal.list.innerHTML = ''
+    modal.actions.innerHTML = ''
+    window.api.ensureHeight(540)
+
+    let choice = selected
+
+    const els = rows.map(r => {
+      const el = document.createElement('div')
+      el.className = 'row' + (r.value === selected ? ' selected' : '')
+      el.innerHTML = `
+        <div class="swatch">${esc(r.badge || '')}</div>
+        <div class="row-body">
+          <div class="row-name">${esc(r.name)}${r.tag ? `<span class="tag${r.tagMuted ? ' muted' : ''}">${esc(r.tag)}</span>` : ''}</div>
+          ${r.sub ? `<div class="row-sub">${esc(r.sub)}</div>` : ''}
+        </div>`
+      el.querySelector('.swatch').style.background = r.color || 'var(--border-strong)'
+      el.addEventListener('click', () => {
+        choice = r.value
+        els.forEach(e => e.classList.remove('selected'))
+        el.classList.add('selected')
+      })
+      modal.list.append(el)
+      return el
+    })
+
+    const done = v => { closeModal(); document.removeEventListener('keydown', onKey); resolve(v) }
+    const onKey = e => { if (e.key === 'Escape') done(undefined) }
+
+    const cancel = Object.assign(document.createElement('button'), { className: 'btn ghost', textContent: 'Cancel' })
+    cancel.onclick = () => done(undefined)
+    modal.actions.append(cancel)
+
+    if (extra) {
+      const b = Object.assign(document.createElement('button'), { className: 'btn ghost', textContent: extra.label })
+      b.onclick = () => done(extra.value)
+      modal.actions.append(b)
+    }
+
+    const confirm = Object.assign(document.createElement('button'), { className: 'btn primary', textContent: ok })
+    confirm.onclick = () => done(choice)
+    modal.actions.append(confirm)
+
+    document.addEventListener('keydown', onKey)
+    modal.root.hidden = false
+  })
+}
+
+async function doChrome (a) {
+  const info = await window.api.chromeList(a.id)
+  if (!info.installed) return showBanner('Google Chrome is not installed in /Applications.')
+
+  const current = info.current?.dir || info.suggestion || null
+
+  const rows = info.profiles.map(p => ({
+    value: p.dir,
+    name: p.name,
+    badge: initials(p.name),
+    color: avatarColor(p.name),
+    tag: p.hasExtension ? 'extension' : 'no extension',
+    tagMuted: !p.hasExtension,
+    sub: [p.userName, p.dir, p.dir === info.suggestion && !info.current ? 'suggested' : null]
+      .filter(Boolean).join(' · ')
+  }))
+  rows.push({ value: '__none__', name: 'Don\u2019t open Chrome', badge: '\u2715', sub: 'Launch Claude on its own' })
+  rows.push({ value: '__new__', name: 'New Chrome profile\u2026', badge: '+', sub: 'Chrome creates it on first launch' })
+
+  const picked = await listModal({
+    title: `Chrome for \u201c${a.name}\u201d`,
+    note: 'Opens alongside this account, so the browser context matches the login.',
+    rows,
+    selected: current,
+    ok: 'Pair'
+  })
+  if (picked === undefined) return
+
+  if (picked === '__none__') {
+    const res = await window.api.chromePair(a.id, null)
+    if (res.error) return showBanner(res.error)
+    accounts = res.accounts
+    return renderPicker()
+  }
+
+  let dir = picked
+  if (picked === '__new__') dir = (await window.api.chromeNewProfile()).dir
+
+  const res = await window.api.chromePair(a.id, dir, true)
+  if (res.error) return showBanner(res.error)
+  accounts = res.accounts
+  renderPicker()
+
+  const chosen = info.profiles.find(p => p.dir === dir)
+  if (picked === '__new__' || (chosen && !chosen.hasExtension)) {
+    const go = await choiceModal({
+      title: 'Install the Claude extension?',
+      note: picked === '__new__'
+        ? 'The new profile starts empty. Chrome cannot be made to install an extension without a managed policy, so this opens the Web Store page in that profile \u2014 one click to add it.'
+        : `\u201c${chosen.name}\u201d does not have the Claude extension. This opens its Web Store page in that profile.`,
+      buttons: ['Open Web Store']
+    })
+    if (go === 0) await window.api.chromeExtension(dir)
+  }
+}
+
+
+// ---------------------------------------------------------------- tooltips ---
+
+// Delegated so it covers rows rendered later, and fixed-position so a tooltip on
+// a card action is not clipped by the scrolling list around it.
+const tooltip = Object.assign(document.createElement('div'), { className: 'tooltip' })
+document.body.append(tooltip)
+
+let tipTimer = null
+let tipFor = null
+
+function hideTip () {
+  clearTimeout(tipTimer)
+  tipFor = null
+  tooltip.classList.remove('visible')
+}
+
+function placeTip (el) {
+  tooltip.textContent = el.dataset.tip
+  tooltip.classList.remove('below')
+  // Measure off-screen before deciding which side it fits on.
+  tooltip.style.left = '-9999px'
+  tooltip.style.top = '0px'
+  tooltip.classList.add('visible')
+
+  const target = el.getBoundingClientRect()
+  const tip = tooltip.getBoundingClientRect()
+
+  let top = target.top - tip.height - 7
+  if (top < 6) { top = target.bottom + 7; tooltip.classList.add('below') }
+
+  const left = Math.max(6, Math.min(
+    target.left + target.width / 2 - tip.width / 2,
+    window.innerWidth - tip.width - 6
+  ))
+
+  tooltip.style.left = `${Math.round(left)}px`
+  tooltip.style.top = `${Math.round(top)}px`
+}
+
+document.addEventListener('mouseover', e => {
+  const el = e.target.closest('[data-tip]')
+  if (!el || el === tipFor) return
+  hideTip()
+  tipFor = el
+  tipTimer = setTimeout(() => { if (tipFor === el) placeTip(el) }, 320)
+})
+
+document.addEventListener('mouseout', e => {
+  const el = e.target.closest('[data-tip]')
+  if (el && el === tipFor) hideTip()
+})
+
+// A tooltip lingering over a dialog that just opened reads as a glitch.
+document.addEventListener('click', hideTip, true)
+window.addEventListener('blur', hideTip)
+
+
+// -------------------------------------------------------- quit one account ---
+
+async function doQuit (a) {
+  const go = await choiceModal({
+    title: `Quit “${a.name}”?`,
+    note: 'Only this account closes; anything else stays open. Claude saves as it goes.',
+    buttons: ['Quit']
+  })
+  if (go !== 0) return
+  const res = await window.api.quitAccount(a.id)
+  if (res.error) return showBanner(res.error)
+  setTimeout(pullStatus, 1500)
+}
+
+// ---------------------------------------------------------- keep in dock ---
+
+const PIN_NOTE_PX = 68
+
+function setPinNote (show) {
+  $('#pin-note').hidden = !show
+  window.api.extraHeight(show ? PIN_NOTE_PX : 0)
+}
+
+async function refreshPinNote () {
+  if (sessionStorage.getItem('pin-dismissed')) return
+  try {
+    const { pinned } = await window.api.dockStatus()
+    setPinNote(!pinned)
+  } catch {}
+}
+
+$('#pin-do').addEventListener('click', async () => {
+  const btn = $('#pin-do')
+  btn.disabled = true
+  btn.textContent = 'Adding…'
+  const res = await window.api.dockPin()
+  btn.disabled = false
+  btn.textContent = 'Keep in Dock'
+  if (res.ok) setPinNote(false)
+  else showBanner(res.error || 'Could not add it to the Dock.')
+})
+
+$('#pin-dismiss').addEventListener('click', () => {
+  sessionStorage.setItem('pin-dismissed', '1')
+  setPinNote(false)
+})
+
+// ------------------------------------------------------ keyboard navigation ---
+
+function moveSelection (delta) {
+  if (!accounts.length) return
+  selectedIndex = (selectedIndex + delta + accounts.length) % accounts.length
+  renderPicker()
+  document.querySelectorAll('#accounts .card')[selectedIndex]
+    ?.scrollIntoView({ block: 'nearest' })
+}
+
+document.addEventListener('keydown', e => {
+  // Never steal keys from a dialog, and only drive the list while it is showing.
+  if (!modal.root.hidden || views.picker.hidden) return
+
+  if (e.metaKey && /^[1-9]$/.test(e.key)) {
+    const a = accounts[Number(e.key) - 1]
+    if (a) { e.preventDefault(); selectedIndex = Number(e.key) - 1; doLaunch(a) }
+    return
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return
+
+  if (e.key === 'ArrowDown') { e.preventDefault(); moveSelection(1) }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); moveSelection(-1) }
+  else if (e.key === 'Enter') {
+    const a = accounts[selectedIndex]
+    if (a) { e.preventDefault(); doLaunch(a) }
+  }
+})
+
+refreshPinNote()
+
+
+// ---------------------------------------------------------------- settings ---
+
+const KEY_SYMBOL = { Command: '\u2318', Alt: '\u2325', Shift: '\u21e7', Control: '\u2303' }
+
+/** Electron accelerator ("Alt+Command+C") rendered the way a Mac shows it. */
+function prettyAccel (accel) {
+  if (!accel) return 'Off'
+  const parts = accel.split('+')
+  const key = parts.pop()
+  const order = ['Control', 'Alt', 'Shift', 'Command']
+  const mods = order.filter(m => parts.includes(m)).map(m => KEY_SYMBOL[m]).join('')
+  return mods + (key.length === 1 ? key.toUpperCase() : key)
+}
+
+/** Build an accelerator from a keydown. Returns null until a usable combo lands. */
+function accelFromEvent (e) {
+  const mods = []
+  if (e.ctrlKey) mods.push('Control')
+  if (e.altKey) mods.push('Alt')
+  if (e.shiftKey) mods.push('Shift')
+  if (e.metaKey) mods.push('Command')
+  if (!mods.length) return null
+
+  const k = e.key
+  if (['Meta', 'Alt', 'Shift', 'Control'].includes(k)) return null
+
+  let key
+  if (/^[a-z]$/i.test(k)) key = k.toUpperCase()
+  else if (/^[0-9]$/.test(k)) key = k
+  else if (k === ' ') key = 'Space'
+  else if (k.startsWith('Arrow')) key = k.slice(5)
+  else if (/^F[0-9]{1,2}$/.test(k)) key = k
+  else if (e.code?.startsWith('Key')) key = e.code.slice(3)
+  else if (e.code?.startsWith('Digit')) key = e.code.slice(5)
+  else return null
+
+  return [...mods, key].join('+')
+}
+
+async function openSettings () {
+  const st = await window.api.getSettings()
+
+  modal.title.textContent = 'Settings'
+  modal.note.textContent = ''
+  modal.note.hidden = true
+  modal.input.hidden = true
+  modal.error.hidden = true
+  modal.list.hidden = false
+  modal.list.innerHTML = ''
+  modal.actions.innerHTML = ''
+  window.api.ensureHeight(400)
+
+  // --- global hotkey -------------------------------------------------------
+  const hk = document.createElement('div')
+  hk.className = 'setting'
+  hk.innerHTML = `
+    <div class="setting-body">
+      <div class="setting-name">Summon with a shortcut</div>
+      <div class="setting-sub">Works from any app. Press it again to put the launcher away.</div>
+    </div>`
+  const cap = Object.assign(document.createElement('button'), {
+    className: 'keycap',
+    textContent: st.hotkeyEnabled ? prettyAccel(st.hotkey) : 'Off'
+  })
+  cap.dataset.tip = 'Click, then press the combination you want'
+  hk.append(cap)
+  modal.list.append(hk)
+
+  let recording = false
+  const stopRecording = () => {
+    recording = false
+    cap.classList.remove('recording')
+    document.removeEventListener('keydown', onRecord, true)
+  }
+
+  async function onRecord (e) {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.key === 'Escape') return stopRecording()
+    const accel = accelFromEvent(e)
+    if (!accel) { cap.textContent = 'Press keys…'; return }
+    const res = await window.api.setHotkey(accel, true)
+    if (res.error) {
+      cap.textContent = st.hotkeyEnabled ? prettyAccel(st.hotkey) : 'Off'
+      modal.error.textContent = res.error
+      modal.error.hidden = false
+    } else {
+      st.hotkey = accel
+      st.hotkeyEnabled = true
+      cap.textContent = prettyAccel(accel)
+      modal.error.hidden = true
+    }
+    stopRecording()
+  }
+
+  cap.onclick = () => {
+    if (recording) return stopRecording()
+    recording = true
+    cap.classList.add('recording')
+    cap.textContent = 'Press keys…'
+    // Capture phase: this must win over the list's own arrow-key handling.
+    document.addEventListener('keydown', onRecord, true)
+  }
+
+  // --- launch at login -----------------------------------------------------
+  const li = document.createElement('div')
+  li.className = 'setting'
+  li.innerHTML = `
+    <div class="setting-body">
+      <div class="setting-name">Launch at login</div>
+      <div class="setting-sub">Starts hidden and waits for the shortcut.</div>
+    </div>`
+  const sw = Object.assign(document.createElement('button'), {
+    className: 'switch' + (st.openAtLogin ? ' on' : '')
+  })
+  sw.setAttribute('aria-label', 'Launch at login')
+  sw.onclick = async () => {
+    const want = !sw.classList.contains('on')
+    const res = await window.api.setLoginItem(want)
+    sw.classList.toggle('on', res.openAtLogin)
+  }
+  li.append(sw)
+  modal.list.append(li)
+
+  // --- menu bar ------------------------------------------------------------
+  const mkSwitch = (name, sub, on, onToggle) => {
+    const row = document.createElement('div')
+    row.className = 'setting'
+    row.innerHTML = `
+      <div class="setting-body">
+        <div class="setting-name">${esc(name)}</div>
+        <div class="setting-sub">${esc(sub)}</div>
+      </div>`
+    const sw = Object.assign(document.createElement('button'), { className: 'switch' + (on ? ' on' : '') })
+    sw.setAttribute('aria-label', name)
+    sw.onclick = () => onToggle(!sw.classList.contains('on'), sw)
+    row.append(sw)
+    modal.list.append(row)
+    return sw
+  }
+
+  let mbSwitch, dockSwitch
+
+  const applyPresentation = async (menuBar, hideDock) => {
+    const res = await window.api.setPresentation(menuBar, hideDock)
+    mbSwitch.classList.toggle('on', res.menuBar)
+    dockSwitch.classList.toggle('on', res.hideDock)
+    // Hiding the Dock icon only makes sense while there is a menu bar to use.
+    dockSwitch.disabled = !res.menuBar
+    dockSwitch.style.opacity = res.menuBar ? '' : '.4'
+  }
+
+  mbSwitch = mkSwitch('Show in the menu bar',
+    'Pick an account without opening a window.',
+    st.menuBar,
+    on => applyPresentation(on, dockSwitch.classList.contains('on')))
+
+  dockSwitch = mkSwitch('Hide the Dock icon',
+    'Menu bar only. The pinned Dock shortcut still works.',
+    st.hideDock,
+    on => applyPresentation(mbSwitch.classList.contains('on'), on))
+
+  dockSwitch.disabled = !st.menuBar
+  dockSwitch.style.opacity = st.menuBar ? '' : '.4'
+
+  const done = Object.assign(document.createElement('button'), { className: 'btn primary', textContent: 'Done' })
+  done.onclick = () => { stopRecording(); closeModal() }
+  modal.actions.append(done)
+
+  modal.root.hidden = false
+}
+
+$('#settings-open').addEventListener('click', openSettings)
+
+// Raised from the menu bar's "Settings…" item.
+window.api.onShowSettings(() => { show('picker'); openSettings() })

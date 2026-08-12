@@ -1,0 +1,651 @@
+'use strict'
+
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, Notification, globalShortcut } = require('electron')
+const { execFile } = require('node:child_process')
+const fs = require('node:fs')
+const fsp = require('node:fs/promises')
+const path = require('node:path')
+const crypto = require('node:crypto')
+const health = require('./health')
+const chrome = require('./chrome')
+const macos = require('./macos')
+const tray = require('./tray')
+
+// Claude Desktop reads CLAUDE_USER_DATA_DIR at startup and calls
+// app.setPath('userData', ...) with it, so a profile directory *is* an account.
+// There is no single-instance lock in the bundle, so profiles run side by side.
+const SUPPORT = app.getPath('appData')            // ~/Library/Application Support
+const DEFAULT_PROFILE = path.join(SUPPORT, 'Claude')
+const CONF_DIR = path.join(SUPPORT, 'CASE')
+const LEGACY_CONF_DIR = path.join(SUPPORT, 'ClaudeAccounts')
+const CONF = path.join(CONF_DIR, 'accounts.json')
+const LEGACY_TSV = path.join(CONF_DIR, 'accounts.tsv')
+const BACKUP_ROOT = path.join(CONF_DIR, 'session-index-backups')
+
+// Carry a pre-rename install across in one move, before anything reads it.
+try {
+  if (!fs.existsSync(CONF_DIR) && fs.existsSync(LEGACY_CONF_DIR)) {
+    fs.renameSync(LEGACY_CONF_DIR, CONF_DIR)
+  }
+} catch {}
+
+let win = null
+
+// macOS reports wasOpenedAtLogin; the --hidden arg covers the login-item case
+// where that flag is not set.
+let startHidden = process.argv.includes('--hidden')
+let isQuitting = false
+
+// ------------------------------------------------------------------ store ---
+
+function readConfig () {
+  try {
+    const raw = JSON.parse(fs.readFileSync(CONF, 'utf8'))
+    if (Array.isArray(raw.accounts)) return raw.accounts
+  } catch {}
+
+  // Migrate the v1 tab-separated file, preserving the names already chosen.
+  try {
+    const accounts = fs.readFileSync(LEGACY_TSV, 'utf8')
+      .split('\n')
+      .map(l => l.split('\t'))
+      .filter(p => p.length >= 2 && p[0].trim() && !p[0].startsWith('#'))
+      .map(([name, dir]) => ({ id: crypto.randomUUID(), name: name.trim(), dir: dir.trim() }))
+    if (accounts.length) { writeConfig(accounts); return accounts }
+  } catch {}
+
+  return null
+}
+
+const DEFAULT_SETTINGS = { hotkey: 'Alt+Command+C', hotkeyEnabled: true, menuBar: true, hideDock: false }
+
+function readRaw () {
+  try { return JSON.parse(fs.readFileSync(CONF, 'utf8')) } catch { return {} }
+}
+
+function readSettings () {
+  return { ...DEFAULT_SETTINGS, ...(readRaw().settings || {}) }
+}
+
+function writeConfig (accounts, settings) {
+  fs.mkdirSync(CONF_DIR, { recursive: true })
+  const raw = readRaw()
+  const next = {
+    version: 2,
+    accounts: accounts || raw.accounts || [],
+    settings: settings || raw.settings || DEFAULT_SETTINGS
+  }
+  const tmp = `${CONF}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(next, null, 2))
+  fs.renameSync(tmp, CONF)
+}
+
+/** Profiles present on disk that the config does not know about yet. */
+function discoverProfiles () {
+  const found = []
+  if (fs.existsSync(DEFAULT_PROFILE)) {
+    found.push({ name: 'Main', dir: DEFAULT_PROFILE, isDefault: true })
+  }
+  let entries = []
+  try { entries = fs.readdirSync(SUPPORT, { withFileTypes: true }) } catch {}
+  for (const e of entries) {
+    if (!e.isDirectory() || !e.name.startsWith('Claude-')) continue
+    if (e.name === 'ClaudeAccounts') continue
+    found.push({ name: e.name.slice('Claude-'.length), dir: path.join(SUPPORT, e.name), isDefault: false })
+  }
+  return found
+}
+
+// ----------------------------------------------------------------- probing ---
+
+function run (cmd, args, timeout = 4000) {
+  return new Promise(resolve => {
+    execFile(cmd, args, { timeout }, (err, stdout) =>
+      resolve({ ok: !err, out: stdout || '' }))
+  })
+}
+
+// macOS hides process environments, so there is no way to ask a running Claude
+// which profile it uses. The profile's own open files are the reliable signal.
+async function isRunning (dir) {
+  const probes = ['Cookies', 'Local Storage/leveldb/LOCK', 'Network Persistent State']
+    .map(p => path.join(dir, p))
+    .filter(f => fs.existsSync(f))
+  if (!probes.length) return false
+  // Probe in parallel: lsof is the slowest thing this app does.
+  const results = await Promise.all(probes.map(f => run('/usr/sbin/lsof', ['--', f], 2500)))
+  return results.some(r => r.ok)
+}
+
+async function sessionCount (dir) {
+  const root = path.join(dir, 'claude-code-sessions')
+  let n = 0
+  try {
+    for (const acct of await fsp.readdir(root)) {
+      for (const org of await fsp.readdir(path.join(root, acct))) {
+        const files = await fsp.readdir(path.join(root, acct, org))
+        n += files.filter(f => f.startsWith('local_') && f.endsWith('.json')).length
+      }
+    }
+  } catch {}
+  return n
+}
+
+async function decorate (accounts) {
+  return Promise.all(accounts.map(async a => ({
+    ...a,
+    isDefault: a.dir === DEFAULT_PROFILE,
+    exists: fs.existsSync(a.dir),
+    running: await isRunning(a.dir),
+    sessions: await sessionCount(a.dir)
+  })))
+}
+
+// ---------------------------------------------------------------- launching ---
+
+async function launchAccount (account) {
+  if (await isRunning(account.dir)) {
+    // Two instances on one profile corrupt its LevelDB stores. macOS cannot
+    // raise a specific instance of a bundle, so this fronts the current one.
+    await run('/usr/bin/osascript', ['-e', 'tell application "Claude" to activate'])
+    await openPairedChrome(account)
+    return { ok: true, alreadyRunning: true }
+  }
+
+  // Snapshot the session index before handing control to Claude. This is the
+  // cheap insurance against the failure mode health.js exists to catch.
+  try { await health.backupIndex(account, BACKUP_ROOT) } catch {}
+
+  fs.mkdirSync(account.dir, { recursive: true })
+
+  const args = ['-n', '-a', 'Claude']
+  if (account.dir !== DEFAULT_PROFILE) {
+    args.push('--env', `CLAUDE_USER_DATA_DIR=${account.dir}`)
+  }
+  const { ok } = await run('/usr/bin/open', args, 15000)
+  await openPairedChrome(account)
+  return { ok, alreadyRunning: false }
+}
+
+/** Bring the account's browser context along, if one is paired and enabled. */
+async function openPairedChrome (account) {
+  const c = account.chrome
+  if (!c || !c.dir || c.openOnLaunch === false) return
+  try { await chrome.launch(c.dir) } catch {}
+}
+
+function slug (name) {
+  const s = name.normalize('NFKD').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  return (s || 'account').slice(0, 40)
+}
+
+function uniqueDir (name) {
+  const base = path.join(SUPPORT, `Claude-${slug(name)}`)
+  let dir = base
+  for (let i = 2; fs.existsSync(dir); i++) dir = `${base}-${i}`
+  return dir
+}
+
+// --------------------------------------------------------------------- IPC ---
+
+function currentAccounts () { return readConfig() || [] }
+
+/** Re-fit the window after the account count changes, so the list never scrolls. */
+function fitWindow () {
+  if (!win || win.isDestroyed()) return
+  const [w] = win.getSize()
+  win.setSize(w, preferredHeight(), true)
+}
+
+// Fast path: config only, no probing. The window must paint immediately.
+ipcMain.handle('accounts:list', async () => {
+  const stored = readConfig()
+  if (stored === null) {
+    // First run: nothing configured. Offer what is already on disk.
+    return { needsSetup: true, discovered: discoverProfiles(), accounts: [] }
+  }
+  return {
+    needsSetup: false,
+    discovered: [],
+    accounts: stored.map(a => ({ ...a, isDefault: a.dir === DEFAULT_PROFILE })),
+    chromeProfiles: chrome.listProfiles()
+  }
+})
+
+// Slow path: lsof and session counts, folded in once they resolve.
+ipcMain.handle('accounts:status', async () => {
+  const stored = readConfig() || []
+  const decorated = await decorate(stored)
+  return decorated.map(({ id, running, sessions, exists }) => ({ id, running, sessions, exists }))
+})
+
+ipcMain.handle('accounts:adopt', async (_e, picked) => {
+  const accounts = picked.map(p => ({ id: crypto.randomUUID(), name: p.name, dir: p.dir }))
+  writeConfig(accounts)
+  fitWindow()
+  return decorate(accounts)
+})
+
+ipcMain.handle('accounts:add', async (_e, name) => {
+  const accounts = currentAccounts()
+  name = (name || '').trim()
+  if (!name) return { error: 'Name cannot be empty.' }
+  if (accounts.some(a => a.name.toLowerCase() === name.toLowerCase())) {
+    return { error: 'An account with that name already exists.' }
+  }
+  const dir = uniqueDir(name)
+  fs.mkdirSync(dir, { recursive: true })
+  accounts.push({ id: crypto.randomUUID(), name, dir })
+  writeConfig(accounts)
+  fitWindow()
+  tray.refresh()
+  return { accounts: await decorate(accounts) }
+})
+
+ipcMain.handle('accounts:rename', async (_e, { id, name }) => {
+  const accounts = currentAccounts()
+  name = (name || '').trim()
+  if (!name) return { error: 'Name cannot be empty.' }
+  if (accounts.some(a => a.id !== id && a.name.toLowerCase() === name.toLowerCase())) {
+    return { error: 'An account with that name already exists.' }
+  }
+  const a = accounts.find(x => x.id === id)
+  if (a) a.name = name
+  writeConfig(accounts)
+  tray.refresh()
+  return { accounts: await decorate(accounts) }
+})
+
+ipcMain.handle('accounts:remove', async (_e, { id, deleteData }) => {
+  const accounts = currentAccounts()
+  const a = accounts.find(x => x.id === id)
+  if (!a) return { error: 'Account not found.' }
+
+  if (deleteData) {
+    if (a.dir === DEFAULT_PROFILE) {
+      return { error: 'The default profile is Claude’s own data directory and cannot be deleted.' }
+    }
+    if (await isRunning(a.dir)) {
+      return { error: 'That account is open. Quit it first, then try again.' }
+    }
+    const sessions = await sessionCount(a.dir)
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'warning',
+      buttons: ['Cancel', 'Delete Permanently'],
+      defaultId: 0,
+      cancelId: 0,
+      message: `Delete “${a.name}” and all of its data?`,
+      detail:
+        `This erases the profile directory and everything in it, including ` +
+        `${sessions} saved session${sessions === 1 ? '' : 's'} and the signed-in account.\n\n` +
+        `Your ~/.claude data — skills, plugins, settings and transcripts — is not affected.\n\n${a.dir}`
+    })
+    if (response !== 1) return { cancelled: true }
+    await fsp.rm(a.dir, { recursive: true, force: true })
+  }
+
+  const next = accounts.filter(x => x.id !== id)
+  writeConfig(next)
+  fitWindow()
+  tray.refresh()
+  return { accounts: await decorate(next) }
+})
+
+ipcMain.handle('accounts:launch', async (_e, id) => {
+  const a = currentAccounts().find(x => x.id === id)
+  if (!a) return { error: 'Account not found.' }
+  return launchAccount(a)
+})
+
+ipcMain.handle('accounts:reveal', async (_e, id) => {
+  const a = currentAccounts().find(x => x.id === id)
+  if (a) shell.showItemInFolder(a.dir)
+})
+
+ipcMain.handle('app:hide', () => { if (win) win.close() })
+
+// A list modal needs more room than a two-account window has. Grow for it, then
+// fitWindow() puts things back when the modal closes.
+ipcMain.handle('app:ensureHeight', (_e, min) => {
+  if (!win || win.isDestroyed()) return
+  const [w, h] = win.getSize()
+  if (h < min) win.setSize(w, min, true)
+})
+
+ipcMain.handle('app:fitWindow', () => fitWindow())
+
+ipcMain.handle('app:extraHeight', (_e, px) => {
+  extraHeight = Math.max(0, Number(px) || 0)
+  fitWindow()
+})
+
+// After picking an account the launcher gets out of the way but stays running,
+// so the next pick is instant instead of a cold Electron start. hide() rather
+// than minimize(): a minimized window leaves a second thumbnail in the Dock.
+ipcMain.handle('app:dismiss', () => { if (win && !win.isDestroyed()) win.hide() })
+
+ipcMain.handle('settings:get', async () => ({
+  ...readSettings(),
+  hotkeyActive: Boolean(currentHotkey),
+  menuBarActive: tray.isEnabled(),
+  dockVisible: process.platform === 'darwin' && app.dock ? app.dock.isVisible() : true,
+  openAtLogin: app.getLoginItemSettings().openAtLogin
+}))
+
+ipcMain.handle('settings:setHotkey', async (_e, { hotkey, enabled }) => {
+  const res = registerHotkey(enabled ? hotkey : null)
+  if (!res.ok && enabled) {
+    applyHotkeyFromSettings()          // keep whatever was working before
+    return { error: res.error }
+  }
+  writeConfig(null, { ...readSettings(), hotkey, hotkeyEnabled: enabled })
+  return { ok: true }
+})
+
+ipcMain.handle('settings:setPresentation', async (_e, { menuBar, hideDock }) => {
+  // No menu bar means the Dock icon has to stay, or the app becomes unreachable.
+  const next = { ...readSettings(), menuBar: Boolean(menuBar), hideDock: Boolean(menuBar && hideDock) }
+  writeConfig(null, next)
+  await applyPresentation()
+  return { menuBar: next.menuBar, hideDock: next.hideDock }
+})
+
+ipcMain.handle('settings:setLoginItem', async (_e, enabled) => {
+  app.setLoginItemSettings({
+    openAtLogin: Boolean(enabled),
+    openAsHidden: true,
+    args: ['--hidden']
+  })
+  return { openAtLogin: app.getLoginItemSettings().openAtLogin }
+})
+
+ipcMain.handle('dock:status', async () => ({ pinned: await macos.isPinned() }))
+
+ipcMain.handle('dock:pin', async () => macos.pinToDock())
+
+ipcMain.handle('accounts:quit', async (_e, id) => {
+  const a = currentAccounts().find(x => x.id === id)
+  if (!a) return { error: 'Account not found.' }
+  return macos.quitProfile(a.dir, f => fs.existsSync(f))
+})
+
+ipcMain.handle('chrome:list', async (_e, accountId) => {
+  const profiles = chrome.listProfiles()
+  const a = currentAccounts().find(x => x.id === accountId)
+  return {
+    installed: chrome.installed(),
+    profiles,
+    suggestion: a ? chrome.suggestFor(a.name, profiles)?.dir || null : null,
+    current: a?.chrome || null
+  }
+})
+
+ipcMain.handle('chrome:pair', async (_e, { accountId, dir, openOnLaunch }) => {
+  const accounts = currentAccounts()
+  const a = accounts.find(x => x.id === accountId)
+  if (!a) return { error: 'Account not found.' }
+  if (dir) a.chrome = { dir, openOnLaunch: openOnLaunch !== false }
+  else delete a.chrome
+  writeConfig(accounts)
+  return { accounts: await decorate(accounts) }
+})
+
+ipcMain.handle('chrome:open', async (_e, dir) => chrome.launch(dir))
+
+ipcMain.handle('chrome:extension', async (_e, dir) => chrome.openExtensionPage(dir))
+
+ipcMain.handle('chrome:newProfile', async () => ({ dir: chrome.nextProfileDir() }))
+
+ipcMain.handle('health:scan', async () => health.scan(currentAccounts(), BACKUP_ROOT))
+
+ipcMain.handle('health:rebuild', async (_e, { accountId, orphan }) => {
+  const a = currentAccounts().find(x => x.id === accountId)
+  if (!a) return { error: 'Account not found.' }
+  return health.rebuild(a, orphan)
+})
+
+ipcMain.handle('health:reveal', async (_e, target) => {
+  if (target) shell.showItemInFolder(target)
+})
+
+ipcMain.handle('app:claudeInstalled', () => fs.existsSync('/Applications/Claude.app'))
+
+// ---------------------------------------------------------------- hotkey ---
+
+let currentHotkey = null
+
+/** Summon the launcher, or put it away if it is already in front. */
+function toggleWindow () {
+  if (!win || win.isDestroyed()) return createWindow()
+  if (win.isVisible() && win.isFocused()) return win.hide()
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+function registerHotkey (accel) {
+  if (currentHotkey) { globalShortcut.unregister(currentHotkey); currentHotkey = null }
+  if (!accel) return { ok: true, registered: false }
+  let ok = false
+  try { ok = globalShortcut.register(accel, toggleWindow) } catch { ok = false }
+  if (ok) currentHotkey = accel
+  // register() returns false when another app already owns the combination.
+  return { ok, registered: ok, error: ok ? null : 'That shortcut is already taken by another app.' }
+}
+
+function applyHotkeyFromSettings () {
+  const s = readSettings()
+  return registerHotkey(s.hotkeyEnabled ? s.hotkey : null)
+}
+
+// -------------------------------------------------------------- menu bar ---
+
+function openWindow () {
+  if (!win || win.isDestroyed()) return createWindow()
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+const TRAY_DEPS = {
+  getState: async () => ({
+    accounts: await decorate(currentAccounts()),
+    issues: lastIssueCount
+  }),
+  onLaunch: async id => {
+    const a = currentAccounts().find(x => x.id === id)
+    if (a) await launchAccount(a)
+    tray.refresh()
+  },
+  onOpenHealth: () => revealHealth(),
+  onOpenSettings: () => { openWindow(); win?.webContents.send('settings:show') },
+  onOpenWindow: openWindow,
+  onQuit: () => app.quit()
+}
+
+/**
+ * Apply the menu-bar / Dock presentation. Hiding the Dock icon is only offered
+ * alongside the menu bar — without either, the app would have no way back.
+ */
+async function applyPresentation () {
+  const s = readSettings()
+  if (s.menuBar) await tray.enable(TRAY_DEPS)
+  else tray.disable()
+
+  if (process.platform === 'darwin' && app.dock) {
+    if (s.menuBar && s.hideDock) app.dock.hide()
+    else app.dock.show()
+  }
+}
+
+// ------------------------------------------------------------ health watch ---
+
+// A scan costs ~50 ms, so checking every couple of minutes is free. The point is
+// latency: the failure this catches is invisible while the app runs, so the gap
+// between "it started failing" and "you were told" is the whole value.
+// CLAUDE_ACCOUNTS_WATCH_MS shortens this for testing.
+const WATCH_INTERVAL_MS = Number(process.env.CLAUDE_ACCOUNTS_WATCH_MS) || 2 * 60 * 1000
+
+let watchTimer = null
+let seenIssues = new Set()
+let lastIssueCount = 0
+
+function issueKeys (data) {
+  const keys = new Set()
+  for (const a of data.accounts) {
+    // Keyed on the account, not the last failure timestamp: a continuing failure
+    // must not re-notify on every tick.
+    if (a.failures && !a.failures.resolved) keys.add(`fail:${a.id}`)
+    for (const o of a.orphans) keys.add(`orphan:${a.id}:${o.cliSessionId}`)
+  }
+  return keys
+}
+
+function issueCount (data) {
+  return data.accounts.reduce((n, a) =>
+    n + a.orphans.length + (a.failures && !a.failures.resolved ? 1 : 0), 0)
+}
+
+function revealHealth () {
+  if (!win || win.isDestroyed()) createWindow()
+  if (win) {
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    win.webContents.send('health:show')
+  }
+}
+
+function notify (title, body) {
+  if (!Notification.isSupported()) return
+  const n = new Notification({ title, body })
+  n.on('click', revealHealth)
+  n.show()
+}
+
+async function healthTick ({ first = false } = {}) {
+  let data
+  try { data = await health.scan(currentAccounts(), BACKUP_ROOT) } catch { return }
+
+  const n = issueCount(data)
+  lastIssueCount = n
+  if (process.platform === 'darwin' && app.dock) app.dock.setBadge(n ? String(n) : '')
+  tray.refresh()
+  if (win && !win.isDestroyed()) win.webContents.send('health:update', data)
+
+  const keys = issueKeys(data)
+  const fresh = [...keys].filter(k => !seenIssues.has(k))
+  seenIssues = keys
+
+  const failing = data.accounts.filter(a => a.failures && !a.failures.resolved)
+  if (failing.length && (first || fresh.some(k => k.startsWith('fail:')))) {
+    // Worth interrupting for: while this lasts, every session is memory-only.
+    notify('Claude is not saving sessions',
+      `${failing.map(a => a.name).join(', ')} — sessions will be lost when Claude restarts.`)
+    return
+  }
+
+  // Pre-existing orphans are old news at startup; the badge already carries them.
+  const newOrphans = first ? [] : fresh.filter(k => k.startsWith('orphan:'))
+  if (newOrphans.length) {
+    notify(newOrphans.length === 1 ? 'A session went missing from Claude’s list'
+                                   : `${newOrphans.length} sessions went missing from Claude’s list`,
+      'Their transcripts survived. Open Claude Accounts to restore them.')
+  }
+}
+
+function startWatching () {
+  healthTick({ first: true })
+  watchTimer = setInterval(() => healthTick(), WATCH_INTERVAL_MS)
+}
+
+// -------------------------------------------------------------------- window ---
+
+// Banners the renderer shows (the Dock prompt) need room the account count
+// alone does not account for.
+let extraHeight = 0
+
+/** Size the window to its content so it never opens as a half-empty panel. */
+function preferredHeight () {
+  const stored = readConfig()
+  if (stored === null) return 560            // setup view carries its own copy
+  const CHROME = 52 + 16 + 60                // titlebar + list padding + footer
+  return Math.max(260, Math.min(760, CHROME + stored.length * 66 + extraHeight))
+}
+
+function createWindow () {
+  win = new BrowserWindow({
+    width: 440,
+    height: preferredHeight(),
+    minWidth: 380,
+    minHeight: 240,
+    show: false,
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 14, y: 18 },
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#1b1b1f' : '#f6f5f3',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+
+  win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
+  win.once('ready-to-show', () => {
+    // Launched at login, the point is to be ready for the hotkey, not to appear.
+    if (!startHidden) { win.show(); win.focus() }
+    startHidden = false
+
+    // Dev aid: CLAUDE_ACCOUNTS_SHOT=/path/to.png renders the window to a file
+    // and exits. Uses in-process capture, so no screen-recording permission.
+    const shot = process.env.CLAUDE_ACCOUNTS_SHOT
+    if (shot) {
+      setTimeout(async () => {
+        const img = await win.webContents.capturePage()
+        fs.writeFileSync(shot, img.toPNG())
+        app.quit()
+      }, 1200)
+    }
+  })
+  // With a global hotkey (or launch-at-login) the app must outlive its window,
+  // or the shortcut dies the first time the window is dismissed.
+  win.on('close', e => {
+    if (isQuitting) return
+    const s = readSettings()
+    let atLogin = false
+    try { atLogin = app.getLoginItemSettings().openAtLogin } catch {}
+    if (s.hotkeyEnabled || atLogin) { e.preventDefault(); win.hide() }
+  })
+
+  win.on('closed', () => { win = null })
+}
+
+app.whenReady().then(() => {
+  try { startHidden = startHidden || app.getLoginItemSettings().wasOpenedAtLogin } catch {}
+  createWindow()
+  applyHotkeyFromSettings()
+  applyPresentation()
+  startWatching()
+  // The window survives a pick (hidden, not closed), so clicking the Dock icon
+  // has to reveal it rather than only rebuild a window that was never gone.
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) return createWindow()
+    if (win && !win.isDestroyed()) {
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    }
+  })
+})
+
+// A launcher has no reason to linger once its window is gone.
+app.on('window-all-closed', () => {
+  const s = readSettings()
+  // With a menu bar or a shortcut there is still a way back in, so closing the
+  // last window should not end the app.
+  if (s.menuBar || s.hotkeyEnabled) return
+  app.quit()
+})
+app.on('before-quit', () => { isQuitting = true; if (watchTimer) clearInterval(watchTimer) })
+app.on('will-quit', () => globalShortcut.unregisterAll())
