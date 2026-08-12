@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254" role="img" aria-labelledby="title desc">
+  <title id="title">Claude Code account switch icon</title>
+  <desc id="desc">Two Claude-style icons connected by bidirectional arrows around a code symbol.</desc>
+
+  <!-- Background -->
+  <rect width="1254" height="1254" fill="#FAF7F2"/>
+
+  <!-- Shared styling -->
+  <defs>
+    <style>
+      .stroke { fill: none; stroke: #D95F32; stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
+      .tile { fill: #FFF4EC; stroke: #D95F32; stroke-width: 20; }
+      .claude { stroke: #D95F32; stroke-width: 18; stroke-linecap: round; }
+    </style>
+  </defs>
+
+  <!-- Top-left Claude tile -->
+  <rect class="tile" x="330" y="263" width="276" height="268" rx="66"/>
+  <g class="claude" transform="translate(468 397)">
+    <line x1="0" y1="-74" x2="0" y2="74"/>
+    <line x1="-74" y1="0" x2="74" y2="0"/>
+    <line x1="-55" y1="-55" x2="55" y2="55"/>
+    <line x1="55" y1="-55" x2="-55" y2="55"/>
+    <line x1="-34" y1="-69" x2="34" y2="69"/>
+    <line x1="34" y1="-69" x2="-34" y2="69"/>
+    <line x1="-69" y1="-34" x2="69" y2="34"/>
+    <line x1="69" y1="-34" x2="-69" y2="34"/>
+  </g>
+
+  <!-- Bottom-right Claude tile -->
+  <rect class="tile" x="654" y="648" width="276" height="268" rx="66"/>
+  <g class="claude" transform="translate(792 782)">
+    <line x1="0" y1="-74" x2="0" y2="74"/>
+    <line x1="-74" y1="0" x2="74" y2="0"/>
+    <line x1="-55" y1="-55" x2="55" y2="55"/>
+    <line x1="55" y1="-55" x2="-55" y2="55"/>
+    <line x1="-34" y1="-69" x2="34" y2="69"/>
+    <line x1="34" y1="-69" x2="-34" y2="69"/>
+    <line x1="-69" y1="-34" x2="69" y2="34"/>
+    <line x1="69" y1="-34" x2="-69" y2="34"/>
+  </g>
+
+  <!-- Upper swap arrow -->
+  <path class="stroke" d="M632 312 C765 316 858 390 870 528"/>
+  <path class="stroke" d="M834 495 L871 534 L907 486"/>
+
+  <!-- Lower swap arrow -->
+  <path class="stroke" d="M624 835 C493 828 400 750 390 617"/>
+  <path class="stroke" d="M354 648 L389 607 L425 650"/>
+
+  <!-- Code symbol -->
+  <g class="stroke" stroke-width="24">
+    <path d="M578 554 L532 594 L578 634"/>
+    <path d="M686 554 L732 594 L686 634"/>
+    <path d="M650 531 L611 661"/>
+  </g>
+</svg>

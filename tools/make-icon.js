@@ -1,21 +1,24 @@
 'use strict'
 
-// Renders assets/icon.png from scratch — no image libraries.
-// Shapes are drawn from signed distance fields, so edges are antialiased
-// analytically rather than by supersampling.
+// Produces the two image assets the app ships:
+//
+//  * assets/icon.png       — the Dock icon, rasterised from assets/icon.svg,
+//                            which is the source of truth for the artwork.
+//  * src/assets/tray*.png  — the menu-bar icon, drawn here instead. A 16px
+//                            monochrome glyph is not a shrunken app icon; the
+//                            arrows and the </> turn to mud at that size, so
+//                            the tray keeps only the two-tile motif.
+//
+// The tray drawing uses signed distance fields, so its edges are antialiased
+// analytically rather than by supersampling. No image libraries either way.
 
+const { execFileSync } = require('node:child_process')
 const zlib = require('node:zlib')
 const fs = require('node:fs')
 const path = require('node:path')
 
+const ROOT = path.join(__dirname, '..')
 const SIZE = 1024
-
-// Indigo plate, warm overlapping discs: reads as "accounts", and stays clearly
-// distinct from Claude's own icon at Dock size.
-const BG_TOP = [0x33, 0x2C, 0x5B]
-const BG_BOTTOM = [0x5A, 0x42, 0x7A]
-const DISC_BACK = [0xEF, 0xE8, 0xDD]
-const DISC_FRONT = [0xD9, 0x77, 0x57]
 
 // ------------------------------------------------------------------ shapes ---
 
@@ -30,28 +33,21 @@ function sdRoundRect (x, y, cx, cy, hw, hh, r) {
   return Math.hypot(ax, ay) + Math.min(Math.max(dx, dy), 0) - r
 }
 
-const sdCircle = (x, y, cx, cy, r) => Math.hypot(x - cx, y - cy) - r
-
 /** Pixel coverage for a signed distance: 1 inside, 0 outside, soft across the edge. */
 const coverage = d => clamp(0.5 - d, 0, 1)
 
-/** Straight-alpha source-over. */
-function over (dst, i, rgb, a) {
-  if (a <= 0) return
-  const inv = 1 - a
-  dst[i] = rgb[0] * a + dst[i] * inv
-  dst[i + 1] = rgb[1] * a + dst[i + 1] * inv
-  dst[i + 2] = rgb[2] * a + dst[i + 2] * inv
-  dst[i + 3] = 255 * a + dst[i + 3] * inv
-}
+// ----------------------------------------------------------- tray template ---
 
-function render (size) {
+// An outlined tile behind a filled one: at 16px two filled tiles merge into a
+// single blob, and two outlined ones lose their edges entirely.
+// Black + alpha only — macOS treats it as a template and inverts it as needed.
+function renderTray (size) {
   const px = new Float64Array(size * size * 4)
-  const s = size / 1024
+  const s = size / 32
 
-  const plate = { cx: size / 2, cy: size / 2, hw: 448 * s, hh: 448 * s, r: 229 * s }
-  const back = { cx: 424 * s, cy: 430 * s, r: 176 * s }
-  const front = { cx: 606 * s, cy: 596 * s, r: 208 * s }
+  const back = { cx: 12.4 * s, cy: 12.4 * s, hw: 8.2 * s, r: 2.9 * s }
+  const front = { cx: 20.2 * s, cy: 20.2 * s, hw: 8.2 * s, r: 2.9 * s }
+  const stroke = 2.3 * s
 
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
@@ -59,24 +55,18 @@ function render (size) {
       const cx = x + 0.5
       const cy = y + 0.5
 
-      const plateA = coverage(sdRoundRect(cx, cy, plate.cx, plate.cy, plate.hw, plate.hh, plate.r))
-      if (plateA <= 0) continue
+      // Ring of the back tile, minus where the front tile (plus a gap) covers it.
+      const ring = Math.abs(sdRoundRect(cx, cy, back.cx, back.cy, back.hw, back.hw, back.r)) - stroke / 2
+      const cut = coverage(sdRoundRect(cx, cy, front.cx, front.cy,
+        front.hw + stroke * 0.6, front.hw + stroke * 0.6, front.r + stroke * 0.6))
+      const ringA = coverage(ring) * (1 - cut)
 
-      const t = clamp((cy - (plate.cy - plate.hh)) / (plate.hh * 2), 0, 1)
-      const bg = [
-        BG_TOP[0] + (BG_BOTTOM[0] - BG_TOP[0]) * t,
-        BG_TOP[1] + (BG_BOTTOM[1] - BG_TOP[1]) * t,
-        BG_TOP[2] + (BG_BOTTOM[2] - BG_TOP[2]) * t
-      ]
-      over(px, i, bg, plateA)
+      const frontA = coverage(sdRoundRect(cx, cy, front.cx, front.cy, front.hw, front.hw, front.r))
 
-      // Back disc, clipped to the plate.
-      over(px, i, DISC_BACK, coverage(sdCircle(cx, cy, back.cx, back.cy, back.r)) * plateA)
-
-      // Dark separation ring, then the front disc on top of it.
-      const ringA = coverage(sdCircle(cx, cy, front.cx, front.cy, front.r + 22 * s)) * plateA
-      over(px, i, [0x2A, 0x24, 0x4C], ringA * 0.85)
-      over(px, i, DISC_FRONT, coverage(sdCircle(cx, cy, front.cx, front.cy, front.r)) * plateA)
+      const a = Math.min(1, ringA + frontA)
+      if (a <= 0) continue
+      px[i] = 0; px[i + 1] = 0; px[i + 2] = 0
+      px[i + 3] = 255 * a
     }
   }
 
@@ -135,54 +125,23 @@ function encodePng (size, rgba) {
   ])
 }
 
-// ----------------------------------------------------------- tray template ---
-
-// A menu-bar icon is monochrome and tiny, so it gets its own drawing rather
-// than a scaled-down app icon: a filled disc over an outlined one, which stays
-// legible at 16px where two filled discs would merge into a blob.
-// Black + alpha only — macOS treats it as a template and inverts it as needed.
-function renderTray (size) {
-  const px = new Float64Array(size * size * 4)
-  const s = size / 32
-
-  const back = { cx: 12.2 * s, cy: 13 * s, r: 8.0 * s }
-  const front = { cx: 20.4 * s, cy: 19.2 * s, r: 8.2 * s }
-  const stroke = 2.2 * s
-
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = (y * size + x) * 4
-      const cx = x + 0.5
-      const cy = y + 0.5
-
-      // Outlined back disc: the ring only, and not where the front disc covers it.
-      const dBack = Math.abs(sdCircle(cx, cy, back.cx, back.cy, back.r)) - stroke / 2
-      const ringA = coverage(dBack) * (1 - coverage(sdCircle(cx, cy, front.cx, front.cy, front.r + stroke * 0.55)))
-
-      // Front disc, solid.
-      const frontA = coverage(sdCircle(cx, cy, front.cx, front.cy, front.r))
-
-      const a = Math.min(1, ringA + frontA)
-      if (a <= 0) continue
-      px[i] = 0; px[i + 1] = 0; px[i + 2] = 0
-      px[i + 3] = 255 * a
-    }
-  }
-
-  const out = Buffer.alloc(size * size * 4)
-  for (let i = 0; i < px.length; i++) out[i] = clamp(Math.round(px[i]), 0, 255)
-  return out
-}
-
 // --------------------------------------------------------------------- main ---
 
-const dest = path.join(__dirname, '..', 'assets', 'icon.png')
+const svg = path.join(ROOT, 'assets', 'icon.svg')
+const dest = path.join(ROOT, 'assets', 'icon.png')
 fs.mkdirSync(path.dirname(dest), { recursive: true })
-fs.writeFileSync(dest, encodePng(SIZE, render(SIZE)))
-console.log(`icon: ${path.relative(process.cwd(), dest)} (${SIZE}×${SIZE})`)
+
+// require('electron') from Node resolves to the path of the binary, not the API.
+const electron = require('electron')
+execFileSync(electron, [path.join(__dirname, 'rasterize-icon.js'), svg, dest, String(SIZE)], {
+  stdio: ['ignore', 'ignore', 'inherit'],
+  cwd: ROOT
+})
+if (!fs.existsSync(dest)) throw new Error('icon rasterisation produced no file')
+console.log(`icon: ${path.relative(process.cwd(), dest)} (${SIZE}×${SIZE}, from icon.svg)`)
 
 // Tray images ship inside src/ so they are packaged with the app.
-const trayDir = path.join(__dirname, '..', 'src', 'assets')
+const trayDir = path.join(ROOT, 'src', 'assets')
 fs.mkdirSync(trayDir, { recursive: true })
 for (const [px, name] of [[16, 'trayTemplate.png'], [32, 'trayTemplate@2x.png']]) {
   const f = path.join(trayDir, name)
