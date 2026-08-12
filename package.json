@@ -1,8 +1,8 @@
 {
   "name": "case",
   "productName": "CASE",
-  "version": "3.0.0",
-  "description": "Claude Account Switcher Engine \u2014 run multiple Claude Desktop accounts side by side on one Mac",
+  "version": "3.1.0",
+  "description": "Claude Account Switcher Engine — run multiple Claude Desktop accounts side by side on one Mac",
   "main": "src/main.js",
   "license": "MIT",
   "private": true,
