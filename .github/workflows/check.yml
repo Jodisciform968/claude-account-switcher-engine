@@ -1,0 +1,40 @@
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Parse, IPC and bridge checks
+        run: npm run check
+
+      # Deliberately not a hash comparison against the committed PNG: the icon
+      # is rasterised by Chromium, whose output is not byte-identical across
+      # versions, so that would fail for reasons that have nothing to do with
+      # the artwork. These are the properties that actually have to hold.
+      - name: Icon renders from icon.svg
+        run: |
+          set -euo pipefail
+          node tools/make-icon.js
+          for f in assets/icon.png src/assets/trayTemplate.png src/assets/trayTemplate@2x.png; do
+            test -s "$f" || { echo "::error::$f is missing or empty"; exit 1; }
+          done
+          W=$(sips -g pixelWidth assets/icon.png | awk '/pixelWidth/{print $2}')
+          A=$(sips -g hasAlpha assets/icon.png | awk '/hasAlpha/{print $2}')
+          echo "icon: ${W}px, alpha=${A}"
+          test "$W" = "1024" || { echo "::error::icon is ${W}px, expected 1024"; exit 1; }
+          test "$A" = "yes" || { echo "::error::icon has no alpha channel, so its corners are not transparent"; exit 1; }

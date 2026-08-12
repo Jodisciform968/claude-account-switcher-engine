@@ -1,12 +1,20 @@
 'use strict'
 
-// Builds Claude Accounts.app and installs it to ~/Applications.
+// Builds CASE.app.
+//
+//   node tools/build.js            → installs to ~/Applications for this Mac
+//   node tools/build.js --dist     → universal zip + checksum in out/, no install
+//
 // Installing to the same path each time keeps an existing Dock pin working.
+// The --dist build is what CI publishes to a release: one universal bundle, so
+// there is a single download whatever Mac someone is on.
 
 const { execFileSync } = require('node:child_process')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+
+const DIST = process.argv.includes('--dist')
 
 const ROOT = path.join(__dirname, '..')
 const ASSETS = path.join(ROOT, 'assets')
@@ -18,6 +26,36 @@ const LEGACY_DEST = path.join(os.homedir(), 'Applications', 'Claude Accounts.app
 
 const sh = (cmd, args, opts = {}) =>
   execFileSync(cmd, args, { stdio: 'inherit', cwd: ROOT, ...opts })
+
+/**
+ * Package the bundle for a release. `ditto` rather than `zip`: it is the only
+ * archiver here that preserves the symlinks inside a framework bundle and the
+ * signature metadata, and it is what the updater unpacks with on the other end.
+ */
+function dist (src) {
+  const pkg = require(path.join(ROOT, 'package.json'))
+  const zip = path.join(OUT, `CASE-${pkg.version}-mac-universal.zip`)
+
+  console.log('==> signing (ad-hoc)')
+  try {
+    execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', src], { stdio: 'ignore' })
+  } catch {
+    console.warn('    warning: ad-hoc signing failed')
+  }
+
+  console.log('==> archiving')
+  fs.rmSync(zip, { force: true })
+  sh('/usr/bin/ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', src, zip])
+
+  // Published beside the zip so the updater can check what it downloaded.
+  const sum = execFileSync('/usr/bin/shasum', ['-a', '256', path.basename(zip)],
+    { cwd: OUT }).toString().trim()
+  fs.writeFileSync(`${zip}.sha256`, sum + '\n')
+
+  const mb = (fs.statSync(zip).size / 1e6).toFixed(1)
+  console.log(`\nbuilt: ${path.relative(ROOT, zip)} (${mb} MB)`)
+  console.log(`sha256: ${sum.split(/\s+/)[0]}`)
+}
 
 // ---------------------------------------------------------------- icon ---
 
@@ -49,7 +87,7 @@ packager({
   out: OUT,
   overwrite: true,
   platform: 'darwin',
-  arch: process.arch === 'x64' ? 'x64' : 'arm64',
+  arch: DIST ? 'universal' : (process.arch === 'x64' ? 'x64' : 'arm64'),
   name: pkg.productName,
   appBundleId: 'local.launcher.case',
   appVersion: pkg.version,
@@ -59,6 +97,8 @@ packager({
   ignore: [/^\/out/, /^\/tools/, /^\/assets/, /^\/\.git/, /^\/README\.md$/]
 }).then(([built]) => {
   const src = path.join(built, `${pkg.productName}.app`)
+
+  if (DIST) return dist(src)
 
   console.log('==> installing')
   fs.mkdirSync(path.dirname(DEST), { recursive: true })

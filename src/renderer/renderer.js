@@ -1250,12 +1250,89 @@ async function openSettings () {
       await refresh()          // reorder the list behind the sheet, immediately
     })
 
+  // --- updates -------------------------------------------------------------
+  mkSwitch('Check for updates',
+    'Once a day, and only ever a check — nothing installs without you saying so.',
+    st.autoUpdateCheck,
+    async (on, sw) => {
+      const res = await window.api.setAutoUpdate(on)
+      sw.classList.toggle('on', res.autoUpdateCheck)
+    })
+
+  const row = document.createElement('div')
+  row.className = 'setting'
+  row.innerHTML = `
+    <div class="setting-body">
+      <div class="setting-name">Version ${esc(st.version || '')}</div>
+      <div class="setting-sub" id="update-state">Up to date, as far as we last looked.</div>
+    </div>`
+  const state = row.querySelector('#update-state')
+  const btn = Object.assign(document.createElement('button'), {
+    className: 'btn ghost', textContent: 'Check now'
+  })
+  btn.dataset.tip = 'Ask GitHub whether there is a newer release'
+  row.append(btn)
+  modal.list.append(row)
+
+  btn.onclick = async () => {
+    btn.disabled = true
+    state.textContent = 'Checking…'
+    const res = await window.api.updateCheck()
+
+    if (!res.ok) {
+      state.textContent = `Could not reach GitHub — ${res.error}`
+      btn.disabled = false
+      return
+    }
+    if (res.none) {
+      state.textContent = 'No releases published yet.'
+      btn.disabled = false
+      return
+    }
+    if (!res.available) {
+      state.textContent = `Version ${res.current} is the latest.`
+      btn.disabled = false
+      return
+    }
+    if (!res.packaged) {
+      // `npm start` runs from the repo, where swapping a bundle means nothing.
+      state.textContent = `Version ${res.version} is out — but this is a dev run, so update with git.`
+      btn.disabled = false
+      return
+    }
+
+    state.textContent = `Version ${res.version} is available.`
+    btn.textContent = 'Install and restart'
+    btn.className = 'btn primary'
+    btn.disabled = false
+    btn.onclick = async () => {
+      btn.disabled = true
+      state.textContent = 'Downloading…'
+      const off = window.api.onUpdateProgress(p => {
+        state.textContent = `Downloading… ${Math.round(p * 100)}%`
+      })
+      const out = await window.api.updateInstall()
+      if (out?.error) {
+        state.textContent = out.error
+        btn.disabled = false
+        return
+      }
+      state.textContent = 'Installing — CASE will reopen in a moment.'
+      void off
+    }
+  }
+
   const done = Object.assign(document.createElement('button'), { className: 'btn primary', textContent: 'Done' })
   done.onclick = () => { stopRecording(); closeModal() }
   modal.actions.append(done)
 
   modal.root.hidden = false
 }
+
+// A background check found something; say so without stealing focus.
+window.api.onUpdateAvailable(info => {
+  showBanner(`Version ${info.version} is available — open Settings to install it.`, 'info')
+})
 
 $('#settings-open').addEventListener('click', openSettings)
 

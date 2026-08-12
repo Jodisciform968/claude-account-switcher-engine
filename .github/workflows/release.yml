@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Only what publishing a release needs. The default token is read-only here
+# otherwise, and nothing in this job wants more than the release API.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # release notes are generated from history
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # Also asserts the tag matches package.json, so a mistagged release
+      # cannot reach anyone.
+      - name: Checks
+        run: npm run check
+
+      - name: Build the universal bundle
+        run: npm run dist
+
+      - name: Verify what we are about to publish
+        run: |
+          set -euo pipefail
+          ZIP=$(ls out/*.zip)
+          echo "archive: $ZIP"
+          shasum -a 256 -c "$ZIP.sha256"
+
+          # Unpack it and confirm it is a real, launchable, correctly versioned app.
+          ditto -x -k "$ZIP" /tmp/verify
+          APP=/tmp/verify/CASE.app
+          test -d "$APP" || { echo "::error::no app in the archive"; exit 1; }
+          codesign --verify --deep --strict "$APP"
+          PLIST="$APP/Contents/Info.plist"
+          BUNDLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")
+          VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")
+          echo "bundle: $BUNDLE  version: $VER"
+          test "$BUNDLE" = "local.launcher.case" || { echo "::error::wrong bundle id"; exit 1; }
+          test "$VER" = "$(node -p 'require("./package.json").version')" || { echo "::error::version mismatch"; exit 1; }
+          lipo -archs "$APP/Contents/MacOS/CASE"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=${GITHUB_REF_NAME}
+          if [ "$TAG" = "main" ]; then TAG="v$(node -p 'require("./package.json").version')"; fi
+
+          # The app is ad-hoc signed, not notarised, so a browser download is
+          # quarantined and Gatekeeper refuses it. Say so where people will read
+          # it, not only in the README.
+          cat > /tmp/notes.md <<'EOF'
+          ### Install
+
+          1. Download the `.zip` below and unzip it.
+          2. Move `CASE.app` to `~/Applications`.
+          3. **First launch only**, clear the download quarantine:
+
+              ```bash
+              xattr -dr com.apple.quarantine ~/Applications/CASE.app
+              ```
+
+          Step 3 is needed because this build is ad-hoc signed rather than
+          notarised — notarising requires a paid Apple Developer account. Without
+          it macOS reports the app as damaged. Updates installed from inside the
+          app do not need this: CASE downloads them itself, and the quarantine
+          flag is only set by browsers.
+
+          Verify the download with the published checksum:
+
+          ```bash
+          shasum -a 256 -c CASE-*-mac-universal.zip.sha256
+          ```
+
+          ---
+          EOF
+
+          gh release create "$TAG" \
+            out/*.zip out/*.zip.sha256 \
+            --title "$TAG" \
+            --notes-file /tmp/notes.md \
+            --generate-notes

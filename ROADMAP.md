@@ -298,19 +298,51 @@ login) or deeply confusing. Needs a clear answer before it ships.
 
 ---
 
-## Phase 7 — Distribution
-
-Only worth it if this leaves your machine.
+## Phase 7 — Distribution ✅ mostly shipped
 
 | # | Item | Effort | Confidence |
 |---|---|---|---|
 | 7.1 | **Export / import** the account list (labels and pairings, never profile data) | S | Verified |
-| 7.2 | **Self-update** from GitHub releases | M | Likely |
-| 7.3 | **Signing and notarisation** | M | Likely |
-| 7.4 | **CI build** on tag | S | Likely |
+| 7.2 | **Self-update** from GitHub releases — ✅ shipped | M | Verified |
+| 7.3 | **Signing and notarisation** | M | ⏸ blocked on a paid account |
+| 7.4 | **CI build** on tag — ✅ shipped | S | Verified |
 
-7.3 needs a paid Apple Developer account. Ad-hoc signing is fine while this only
-runs here.
+**7.4.** `check.yml` runs on every push: every source file parses, and — the
+part worth having — renderer, preload and main are checked to agree on their IPC
+channel names, which are plain strings and otherwise fail at runtime in a menu
+nobody opened. `release.yml` runs on a `v*` tag, refuses if the tag and
+`package.json` disagree, builds one **universal** bundle so there is a single
+download, then verifies its own output before publishing: checksum, ad-hoc
+signature, bundle id, version, and that `lipo` really reports both
+architectures.
+
+The icon check is deliberately *not* a hash comparison against the committed
+PNG. It is rasterised by Chromium, whose output is not byte-identical across
+versions, so that would fail for reasons unrelated to the artwork. It asserts
+1024px and an alpha channel instead.
+
+**7.2.** Electron's own `autoUpdater` was not an option: on macOS it goes
+through Squirrel, which refuses anything without a Developer ID signature — so
+7.3 blocks it. The updater is therefore by hand, in `src/update.js`: fetch the
+release, check it against the `.sha256` published beside it, confirm the bundle
+id, then hand the swap to a detached script that waits for the app to exit. The
+old bundle is moved aside rather than deleted, and moved back if the copy fails,
+so a failure leaves a working app rather than none. A release with no checksum
+is refused rather than trusted — without a signature to lean on, that file is
+the only thing between a download and running whatever arrived.
+
+One quirk that makes this work better than expected: **the quarantine flag is
+set by whatever downloads a file**, and Electron's net stack does not set it. So
+updates install without a Gatekeeper prompt even though the first download, made
+in a browser, needs `xattr -dr com.apple.quarantine`.
+
+**7.3 is the real gap and needs $99/yr.** Until then the first install is
+genuinely awkward: an ad-hoc signed app that has been quarantined is reported as
+*damaged*, which is worse than "unidentified developer", and since macOS 15 the
+right-click → Open trick is gone. The README says so plainly rather than
+pretending otherwise, and so does every release's notes.
+
+**7.1** is still open, and is now the only cheap thing left in this phase.
 
 ---
 

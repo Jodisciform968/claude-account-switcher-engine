@@ -47,16 +47,47 @@ pretending to be live.
 
 ## Install
 
+Download the latest `.zip` from [Releases](https://github.com/pstarostka/claude-account-switcher-engine/releases/latest),
+unzip it, and move `CASE.app` to `~/Applications`. Then, **once**:
+
+```bash
+xattr -dr com.apple.quarantine ~/Applications/CASE.app
+```
+
+That last step is not optional, and it is worth being straight about why. The
+build is **ad-hoc signed but not notarised** — notarising needs a paid Apple
+Developer account. macOS quarantines anything a browser downloads, and for an
+app it does not recognise it reports it as *damaged* rather than merely
+unidentified. The command clears the quarantine flag. Verify what you
+downloaded first if you like:
+
+```bash
+shasum -a 256 -c CASE-*-mac-universal.zip.sha256
+```
+
+Then open it and right-click its Dock icon → **Options → Keep in Dock** — or let
+the app offer to do it for you.
+
+**Updates do not need any of that.** CASE checks GitHub once a day, and installs
+from **Settings → Check now**. It downloads the release itself, checks it
+against the published checksum, and swaps the bundle — and because the
+quarantine flag is only ever set by the program that downloads a file, an update
+CASE fetched is not quarantined.
+
+### Building it yourself
+
 ```bash
 npm install
 npm run build
 ```
 
-That builds `~/Applications/CASE.app` and installs it. Open it once
-from Finder, then right-click its Dock icon → **Options → Keep in Dock**.
+That builds `~/Applications/CASE.app` and installs it, for this Mac's
+architecture. Rebuilding installs to the same path, so a pinned Dock tile keeps
+working; if the tile shows a stale icon, run `killall Dock`.
 
-Rebuilding installs to the same path, so a pinned Dock tile keeps working.
-If the tile shows a stale icon, run `killall Dock`.
+`npm run dist` instead produces the universal zip and checksum in `out/` without
+installing anything — that is what CI publishes. `npm run check` runs the
+parse, IPC and bridge checks.
 
 ## How it works
 
@@ -287,3 +318,22 @@ launch-at-login was enabled, turn it off in Settings first.
 
 Note: while a global shortcut is enabled, closing the window hides it instead of
 quitting — a shortcut cannot outlive its process. Use `⌘Q` to quit properly.
+
+## Releasing
+
+Bump the version in `package.json`, then tag it. CI does the rest — the tag has
+to match the version or the build refuses.
+
+```bash
+git tag v3.1.0 && git push origin v3.1.0
+```
+
+`.github/workflows/release.yml` builds the universal bundle, verifies its
+checksum, signature, bundle id, version and architectures, then publishes it to
+a GitHub release with install instructions attached.
+
+## Licence
+
+[MIT](LICENSE) — use it, fork it, ship it. Keep the copyright notice.
+
+Electron is bundled in the built app under its own MIT licence.

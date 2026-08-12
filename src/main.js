@@ -9,6 +9,7 @@ const crypto = require('node:crypto')
 const health = require('./health')
 const usage = require('./usage')
 const archive = require('./archive')
+const update = require('./update')
 const chrome = require('./chrome')
 const macos = require('./macos')
 const tray = require('./tray')
@@ -66,7 +67,10 @@ const DEFAULT_SETTINGS = {
   hideDock: false,
   // Off by default: reordering the list also reorders ⌘1–9, and with two
   // accounts the order would flip on every switch.
-  sortByRecent: false
+  sortByRecent: false,
+  // Checks only — nothing is ever downloaded or installed without being asked.
+  autoUpdateCheck: true,
+  lastUpdateCheck: 0
 }
 
 function readRaw () {
@@ -510,6 +514,8 @@ ipcMain.handle('app:dismiss', () => { if (win && !win.isDestroyed()) win.hide() 
 
 ipcMain.handle('settings:get', async () => ({
   ...readSettings(),
+  version: app.getVersion(),
+  packaged: app.isPackaged,
   hotkeyActive: Boolean(currentHotkey),
   menuBarActive: tray.isEnabled(),
   dockVisible: process.platform === 'darwin' && app.dock ? app.dock.isVisible() : true,
@@ -601,6 +607,35 @@ ipcMain.handle('health:reveal', async (_e, target) => {
 
 ipcMain.handle('app:claudeInstalled', () => fs.existsSync('/Applications/Claude.app'))
 
+// -------------------------------------------------------------- self-update ---
+
+// Held between the check and the install so the renderer never handles a path.
+let staged = null
+
+ipcMain.handle('update:check', async () => {
+  const res = await update.check()
+  lastUpdate = res
+  if (res.available) writeConfig(null, { ...readSettings(), lastUpdateCheck: Date.now() })
+  return { ...res, packaged: app.isPackaged }
+})
+
+ipcMain.handle('update:install', async _e => {
+  if (!lastUpdate?.available) return { error: 'No update to install.' }
+  const got = await update.download(lastUpdate, p => {
+    if (win && !win.isDestroyed()) win.webContents.send('update:progress', p)
+  })
+  if (got.error) return got
+  staged = got
+  const res = await update.apply(staged)
+  if (res.error) return res
+  // The swap script waits for this process to exit before replacing the bundle.
+  isQuitting = true
+  setTimeout(() => app.quit(), 250)
+  return res
+})
+
+ipcMain.handle('update:page', async () => shell.openExternal(update.RELEASES_PAGE))
+
 // ---------------------------------------------------------------- hotkey ---
 
 let currentHotkey = null
@@ -669,6 +704,37 @@ async function applyPresentation () {
     else app.dock.show()
   }
 }
+
+// ----------------------------------------------------------- update watch ---
+
+const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000
+
+let lastUpdate = null
+
+/**
+ * A quiet daily check. It only ever *looks* — installing stays a decision, and
+ * a launcher that cannot reach GitHub should behave exactly as it always did.
+ */
+async function updateTick () {
+  if (!app.isPackaged) return
+  const s = readSettings()
+  if (!s.autoUpdateCheck) return
+  if (Date.now() - (s.lastUpdateCheck || 0) < UPDATE_EVERY_MS) return
+
+  const res = await update.check()
+  lastUpdate = res
+  if (!res.ok) return
+  writeConfig(null, { ...readSettings(), lastUpdateCheck: Date.now() })
+  if (res.available && win && !win.isDestroyed()) {
+    win.webContents.send('update:available', res)
+  }
+}
+
+ipcMain.handle('settings:setAutoUpdate', async (_e, enabled) => {
+  const on = Boolean(enabled)
+  writeConfig(null, { ...readSettings(), autoUpdateCheck: on })
+  return { autoUpdateCheck: on }
+})
 
 // ------------------------------------------------------------ health watch ---
 
@@ -819,6 +885,8 @@ app.whenReady().then(() => {
   applyHotkeyFromSettings()
   applyPresentation()
   startWatching()
+  // Behind the first paint: an update check is never worth delaying the window.
+  setTimeout(() => { updateTick().catch(() => {}) }, 4000)
   // The window survives a pick (hidden, not closed), so clicking the Dock icon
   // has to reveal it rather than only rebuild a window that was never gone.
   app.on('activate', () => {

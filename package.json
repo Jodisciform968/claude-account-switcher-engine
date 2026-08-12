@@ -6,9 +6,15 @@
   "main": "src/main.js",
   "license": "MIT",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pstarostka/claude-account-switcher-engine.git"
+  },
   "scripts": {
     "start": "electron .",
-    "build": "node tools/build.js"
+    "build": "node tools/build.js",
+    "dist": "node tools/build.js --dist",
+    "check": "node tools/check.js"
   },
   "devDependencies": {
     "@electron/packager": "^20.3.0",
