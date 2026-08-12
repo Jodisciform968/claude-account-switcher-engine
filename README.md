@@ -285,8 +285,6 @@ cp -f "$HOME/Library/Application Support/Claude/claude_desktop_config.json" \
   pick is instant. Hiding rather than minimizing keeps a second thumbnail out of
   the Dock. Clicking the Dock icon brings it back; Escape closes it outright.
 
-See [ROADMAP.md](ROADMAP.md) for planned extensions.
-
 ## Layout
 
 ```
