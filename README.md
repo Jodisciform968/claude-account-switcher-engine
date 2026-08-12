@@ -13,9 +13,10 @@ Click the Dock icon, pick an account, Claude opens signed in as that account.
 │                                        │
 │   💼   Work                    ●   ⌘1  │
 │        Running · 29 sessions           │
-│                                        │
+│        ▇▇▇▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
 │   PE   Personal                    ⌘2  │
 │        2h ago · 3 sessions · Chrome    │
+│        ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▁▁▁▁▁▁▁▁▁▁▁▁▁ │
 │                                        │
 │   + Add account          ⚙   ⛨ Sessions│
 └────────────────────────────────────────┘
@@ -31,6 +32,12 @@ Accounts also remember when you last opened them; **Settings → Sort by most
 recently used** moves the last one you used to the top, taking `⌘1`–`⌘9` with
 it. That is off by default, because with two accounts the order would flip on
 every switch.
+
+The bar along the bottom of a card is **plan usage** — whichever of the
+five-hour and weekly limits is further along, turning amber past 75% and red
+past 90%. Hover for both figures. Claude records this itself every five minutes
+in `plan-usage-history.json`; CASE only reads it, and says "as of" rather than
+pretending to be live.
 
 ## Install
 

@@ -687,3 +687,30 @@ body {
   border-color: var(--accent);
   box-shadow: inset 0 0 0 2px var(--panel), 0 0 0 2px var(--accent);
 }
+
+
+/* ----------------------------------------------------------- usage meter --- */
+
+/* Along the bottom edge, inside the card's own padding: glanceable without
+   competing with the name, the subtitle or the hover actions. */
+.meter {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 5px;
+  height: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text) 11%, transparent);
+  overflow: hidden;
+}
+
+.meter span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 75%, transparent);
+  transition: width .3s ease;
+}
+
+.meter.warn span { background: #d9a441; }
+.meter.high span { background: var(--danger); }

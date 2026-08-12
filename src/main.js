@@ -7,6 +7,7 @@ const fsp = require('node:fs/promises')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const health = require('./health')
+const usage = require('./usage')
 const chrome = require('./chrome')
 const macos = require('./macos')
 const tray = require('./tray')
@@ -163,7 +164,8 @@ async function decorate (accounts) {
     isDefault: a.dir === DEFAULT_PROFILE,
     exists: fs.existsSync(a.dir),
     running: await isRunning(a.dir),
-    sessions: await sessionCount(a.dir)
+    sessions: await sessionCount(a.dir),
+    usage: usage.read(a.dir)
   })))
 }
 
@@ -244,7 +246,7 @@ ipcMain.handle('accounts:list', async () => {
 ipcMain.handle('accounts:status', async () => {
   const stored = readConfig() || []
   const decorated = await decorate(stored)
-  return decorated.map(({ id, running, sessions, exists }) => ({ id, running, sessions, exists }))
+  return decorated.map(({ id, running, sessions, exists, usage }) => ({ id, running, sessions, exists, usage }))
 })
 
 ipcMain.handle('accounts:adopt', async (_e, picked) => {

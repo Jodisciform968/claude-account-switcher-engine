@@ -86,8 +86,8 @@ Right now an account is a name and a hash-derived colour.
 |---|---|---|---|
 | 2.1 | **Custom colour and emoji** per account — ✅ shipped | S | Verified |
 | 2.2 | **Last-used timestamp**, sort by recency — ✅ shipped | S | Verified |
-| 2.3 | **Usage / plan meter** per account | M | Research |
-| 2.4 | **Show the signed-in identity** rather than a label you typed | M | Research |
+| 2.3 | **Usage / plan meter** per account — ✅ shipped | M | ~~Research~~ Verified |
+| 2.4 | **Show the signed-in identity** rather than a label you typed | M | ❌ Ruled out |
 
 **2.1 and 2.2 shipped together**, since they are the same question — how do you
 tell two accounts apart at a glance. The pencil button now opens one **Edit**
@@ -107,16 +107,29 @@ And returning `decorate()`d accounts from the save handler put its `lsof` probes
 (~2s) between pressing Save and seeing the new name, so the update path now
 returns the stored list and the renderer keeps the status it already has.
 
-**2.3** — each profile carries `plan-usage-history.json` (281 KB in the main
-profile), so the data is right there. Unknown: its schema and whether it is
-current enough to show a "62% of weekly limit" bar.
-→ *Test:* pretty-print it and see whether entries carry timestamps and totals.
+**2.3 — test run, and it passed.** `plan-usage-history.json` is
+`{version, samples}`, each sample `{t, org, u:{fh, sd}}`: a timestamp, an org
+UUID and two integers from 0 to 100. Claude writes one every five minutes, in
+every profile, and the newest is minutes old.
 
-**2.4** — profiles hold `lastKnownAccountUuid`, but a UUID is not a name. The
-email may not be recoverable from disk at all; it may live only behind the web
-session. If it isn't, 2.1 is the answer and this item dies.
-→ *Test:* `grep -ril "@" <profile>/config.json <profile>/ant-device-registry.json`
-and check what identity material is actually present.
+The key names were not taken on trust. Over 3283 samples and 25 days, runs of
+non-zero `fh` cap at **4.83–5.14 hours** and then fall to zero inside a single
+sampling interval — a fixed five-hour window that resets, not a rolling one.
+Runs of non-zero `sd` last **4.9–6.9 days**. So `fh` is percent of the five-hour
+limit and `sd` percent of the weekly one.
+
+**Shipped** as a two-pixel bar along the bottom edge of each card, tracking
+whichever limit is further along, with a tooltip giving both figures and when
+they were taken. A sample only describes the moment it was taken, so `src/usage.js`
+zeroes a figure once its whole window has elapsed since then, and the tooltip
+always says "as of" rather than implying it is live.
+
+**2.4 — test run, and it failed. Ruled out.** The stable per-profile file,
+`config.json`, holds `lastKnownAccountUuid` and two opaque `oauth:tokenCache`
+blobs, and no address. A sweep of both entire profiles found addresses only
+inside per-session sandbox copies of `.claude.json` and IndexedDB blobs —
+neither a stable nor a decent source, and both credential-adjacent. As predicted,
+**2.1 is the answer instead**: name the account yourself and give it an icon.
 
 ---
 
@@ -184,7 +197,7 @@ should stay the default — but two escape hatches are worth having.
 |---|---|---|---|
 | 4.1 | **Preference sync toggle** — copy `claude_desktop_config.json` at launch | S | Verified |
 | 4.2 | **Hard isolation** — opt-in `CLAUDE_CONFIG_DIR` per account | M | Verified |
-| 4.3 | **Per-account default model / effort** | M | Research |
+| 4.3 | **Per-account default model / effort** | M | ❌ Ruled out |
 
 **4.1** must be a copy, not a symlink — the app rewrites that file by rename,
 which replaces a symlink with a regular file. We watched it happen. One-way,
@@ -194,9 +207,11 @@ with a clearly named source account, so the direction is never a surprise.
 servers. It genuinely forks skills, plugins, agents and settings — so it needs a
 blunt warning, not a quiet checkbox.
 
-**4.3** → *Test:* change model in the app, then diff the profile to find which
-file moved. If it lands in `config.json` next to the OAuth tokens, writing it
-ourselves is too invasive and this item should be dropped.
+**4.3 — test run, and it failed. Ruled out.** No model or effort key appears in
+any JSON at the profile root, so the preference lives in Local Storage or
+IndexedDB. Those are LevelDB stores, and ground rule 2 exists precisely because
+a second writer corrupts them — there is no safe way for this app to set it
+while Claude is running, which is the only time it would matter.
 
 ---
 
@@ -285,6 +300,8 @@ Recorded so they don't get proposed again.
 | **One Dock tile per account** | Needs a duplicated `Claude.app` with its own bundle id, which breaks signature, entitlements, TCC grants and auto-updates. Not worth it. |
 | **Raising a specific instance** | macOS activates apps, not processes. `activate` fronts whichever Claude the system considers current. Quitting a specific one (1.4) does work. |
 | **Symlinking `claude_desktop_config.json`** | Rewritten by rename, which replaces the symlink. Copy instead (4.1). |
+| **Showing the signed-in email** (2.4) | Not on disk in any stable place. `config.json` has only `lastKnownAccountUuid` and opaque token caches; addresses appear only in per-session sandbox copies and IndexedDB. Name the account yourself (2.1). |
+| **Per-account default model** (4.3) | Not in any profile-root JSON, so it lives in LevelDB — which a second writer corrupts (ground rule 2). |
 
 ---
 
@@ -297,8 +314,12 @@ Recorded so they don't get proposed again.
 4. **2.1 + 2.2** — accounts become recognisable at a glance.
 5. Run the Phase 2–4 research tests, then decide what survives.
 
-Steps 1–4 are done. **Next up is step 5**: 2.3 and 2.4 both hinge on a test that
-has not been run, and 4.3 on another. Run those three before scheduling any of
-them — the roadmap is not a queue where research items are concerned.
+All five are done. Step 5 paid for itself: of the three research items, **2.3
+survived contact with the evidence and shipped; 2.4 and 4.3 did not, and are now
+in Ruled out.** Two of three failing is the normal rate, and is the reason those
+items were never scheduled on the strength of the idea alone.
+
+What is left is Phase 6 (lifecycle) and Phase 7 (distribution), and neither is
+worth starting while this runs on one machine. 3.4 stays deliberately unattempted.
 
 Phases 6 and 7 only if this stops being a personal tool.

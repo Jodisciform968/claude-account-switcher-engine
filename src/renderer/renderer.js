@@ -308,6 +308,16 @@ function subtitle (a) {
   return bits.filter(Boolean).join(' · ')
 }
 
+// Which limit bites first is what you actually want to know when picking an
+// account, so the bar tracks whichever of the two is further along.
+const usagePct = u => (u ? Math.max(u.fh, u.sd) : 0)
+
+function usageTip (u) {
+  const when = u.age < 90000 ? 'just now' : fmtAgo(u.at)
+  return `Plan usage as of ${when} — ${u.fh}% of the 5-hour limit, ` +
+         `${u.sd}% of the weekly one. Claude records this itself, every 5 minutes.`
+}
+
 function renderPicker () {
   const list = $('#accounts')
   list.innerHTML = ''
@@ -338,6 +348,18 @@ function renderPicker () {
 
     // Set via CSSOM, not a style attribute: the strict CSP blocks inline styles.
     card.querySelector('.avatar').style.background = accountColor(a)
+
+    const pct = usagePct(a.usage)
+    if (pct > 0) {
+      const meter = document.createElement('div')
+      meter.className = 'meter' + (pct >= 90 ? ' high' : pct >= 75 ? ' warn' : '')
+      const fill = document.createElement('span')
+      fill.style.width = `${pct}%`
+      meter.append(fill)
+      card.append(meter)
+      // On the card rather than the 2px bar, which is far too small to hover.
+      card.dataset.tip = usageTip(a.usage)
+    }
 
     card.addEventListener('click', async e => {
       const act = e.target.closest('[data-act]')?.dataset.act
@@ -372,7 +394,8 @@ async function pullStatus () {
   accounts = accounts.map(a => {
     const s = by.get(a.id)
     if (!s) return a
-    if (a.running !== s.running || a.sessions !== s.sessions || a.exists !== s.exists) changed = true
+    if (a.running !== s.running || a.sessions !== s.sessions || a.exists !== s.exists ||
+        usagePct(a.usage) !== usagePct(s.usage)) changed = true
     return { ...a, ...s }
   })
   if (changed) renderPicker()
