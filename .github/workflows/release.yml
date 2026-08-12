@@ -38,7 +38,10 @@ jobs:
           set -euo pipefail
           ZIP=$(ls out/*.zip)
           echo "archive: $ZIP"
-          shasum -a 256 -c "$ZIP.sha256"
+          # The checksum file names the archive without a path, so that whoever
+          # downloads both into one folder can just run `shasum -c`. Verify it
+          # the same way they will, from beside the file.
+          ( cd out && shasum -a 256 -c "$(basename "$ZIP").sha256" )
 
           # Unpack it and confirm it is a real, launchable, correctly versioned app.
           ditto -x -k "$ZIP" /tmp/verify
