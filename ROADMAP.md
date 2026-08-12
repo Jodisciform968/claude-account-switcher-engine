@@ -259,14 +259,38 @@ Still open from this phase:
 
 ---
 
-## Phase 6 — Profile lifecycle
+## Phase 6 — Profile lifecycle ✅ partly shipped
 
 | # | Item | Effort | Confidence |
 |---|---|---|---|
-| 6.1 | **Disk usage** per account | S | Verified |
-| 6.2 | **Archive** — move a profile aside without deleting | M | Verified |
+| 6.1 | **Disk usage** per account — ✅ shipped | S | Verified |
+| 6.2 | **Archive** — move a profile aside without deleting — ✅ shipped | M | Verified |
 | 6.3 | **Snapshot / restore** before risky changes | M | Likely |
 | 6.4 | **Clone an account** | M | Research |
+
+**6.1 and 6.2 shipped together**, because size is what makes the archive
+decision. A profile here is 0.5–8.4 GB — the main one is 8.4, seven of which is
+`vm_bundles` — so "remove this account" and "reclaim that space" are very
+different acts, and the app now says which is which.
+
+The trash button opens three rows rather than three buttons: **Remove from
+list** (keeps everything), **Archive** (carries the measured size), and **Delete
+everything**. The rows exist to spell out the difference, so their explanations
+wrap rather than truncate.
+
+**Archiving is a rename, never a copy-then-delete.** That is atomic and instant
+whatever the profile weighs, and there is no half-state to fail in the middle
+of. `Claude-Foo` becomes `Claude-Foo.archived`, discovery learns to skip that
+suffix so it is never re-adopted by accident, and a banner in the picker offers
+it back. Restoring renames it home; if something has taken that path since, it
+lands beside it rather than over it. Deleting an archive is the one destructive
+call, is named as such, and keeps its native warning.
+
+Notes from building it. `du` measures 8.4 GB in ~110 ms, so sizing can happen
+inline when the menu opens. Archive and restore return the stored list rather
+than a decorated one, for the same reason the edit path does — `lsof` would
+otherwise sit between the click and the list changing; measured, that was the
+difference between ~2 s and ~300 ms.
 
 **6.4** — cloning copies the cookies too, so the clone is signed into the *same*
 account. That is either exactly what you want (a scratch profile for the same
@@ -319,7 +343,13 @@ survived contact with the evidence and shipped; 2.4 and 4.3 did not, and are now
 in Ruled out.** Two of three failing is the normal rate, and is the reason those
 items were never scheduled on the strength of the idea alone.
 
-What is left is Phase 6 (lifecycle) and Phase 7 (distribution), and neither is
-worth starting while this runs on one machine. 3.4 stays deliberately unattempted.
+**6.1 and 6.2 shipped after that**, ahead of the note above saying Phase 6 was
+not worth starting on one machine. That note was about distribution; an 8.4 GB
+profile you cannot see the size of is a problem whether or not anyone else ever
+runs this.
+
+Left: **6.3** and **6.4** (6.4 still needs its answer about cloned cookies), and
+Phase 7, which only matters if this leaves the machine. 3.4 stays deliberately
+unattempted.
 
 Phases 6 and 7 only if this stops being a personal tool.

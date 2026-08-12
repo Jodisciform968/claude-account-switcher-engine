@@ -6,7 +6,18 @@ const views = { setup: $('#setup'), picker: $('#picker'), health: $('#health') }
 const banner = $('#banner')
 
 let accounts = []
+let archived = []
 let refreshTimer = null
+
+// Banners sit above the list and each needs the window to grow. They are summed
+// rather than set, or the second one to appear would cancel out the first.
+const PIN_NOTE_PX = 68
+const ARCHIVED_NOTE_PX = 52
+const extras = {}
+function setExtra (key, px) {
+  extras[key] = px
+  window.api.extraHeight(Object.values(extras).reduce((a, b) => a + b, 0))
+}
 
 // ------------------------------------------------------------------ utils ---
 
@@ -56,6 +67,16 @@ const accountBadge = a => a.emoji || initials(a.name)
 
 function plural (n, word) { return `${n} ${word}${n === 1 ? '' : 's'}` }
 
+/** Decimal units, to match what Finder reports for the same folder. */
+function fmtBytes (bytes) {
+  if (!Number.isFinite(bytes)) return 'unknown size'
+  const units = ['bytes', 'KB', 'MB', 'GB', 'TB']
+  let n = bytes
+  let i = 0
+  while (n >= 1000 && i < units.length - 1) { n /= 1000; i++ }
+  return `${i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`
+}
+
 /** Coarse on purpose: "when did I last use this" needs no more than this. */
 function fmtAgo (ms) {
   const mins = (Date.now() - ms) / 60000
@@ -71,10 +92,21 @@ let selectedIndex = 0
 let chromeProfiles = []
 const chromeName = dir => chromeProfiles.find(p => p.dir === dir)?.name || dir
 
-function showBanner (msg) {
+let bannerTimer = null
+
+/** kind 'info' for "that worked"; the default red is for failures. */
+function showBanner (msg, kind = 'error') {
   banner.textContent = msg
+  banner.classList.toggle('info', kind === 'info')
   banner.hidden = false
-  setTimeout(() => { banner.hidden = true }, 6000)
+  // Measured, not assumed: a two-line message is twice the height of a one-line
+  // one, and without this the list below loses exactly that much room.
+  setExtra('banner', banner.offsetHeight + 8)
+  clearTimeout(bannerTimer)
+  bannerTimer = setTimeout(() => {
+    banner.hidden = true
+    setExtra('banner', 0)
+  }, 6000)
 }
 
 function show (name) {
@@ -381,7 +413,9 @@ async function refresh () {
   if (res.needsSetup) { renderSetup(res.discovered); show('setup'); return }
   accounts = res.accounts
   chromeProfiles = res.chromeProfiles || []
+  archived = res.archived || []
   renderPicker()
+  renderArchived()
   show('picker')
   await pullStatus()
 }
@@ -430,23 +464,120 @@ async function doEdit (a) {
 }
 
 async function doRemove (a) {
-  const choice = await choiceModal({
+  // Three verbs will not fit as buttons, and they differ enough that the
+  // difference is the whole point — so they are rows, each spelling out what
+  // survives. Measuring first: du on 8 GB is about a tenth of a second.
+  const { bytes } = await window.api.size(a.id)
+
+  const rows = [{
+    value: 'forget',
+    name: 'Remove from list',
+    badge: '✕',
+    wrap: true,
+    sub: 'Keeps the profile exactly where it is. Add it back any time.'
+  }]
+
+  if (!a.isDefault) {
+    rows.push({
+      value: 'archive',
+      name: 'Archive',
+      badge: '▤',
+      tag: fmtBytes(bytes),
+      tagMuted: true,
+      wrap: true,
+      sub: 'Renames the folder aside. Nothing is deleted, and it can be restored.'
+    })
+    rows.push({
+      value: 'delete',
+      name: 'Delete everything',
+      badge: '☠',
+      wrap: true,
+      sub: `Erases the folder, ${plural(a.sessions, 'session')} and the signed-in account.`
+    })
+  }
+
+  const picked = await listModal({
     title: `Remove “${a.name}”?`,
     note: a.isDefault
-      ? 'This is Claude’s own profile, so its data cannot be deleted — it can only leave this list.'
-      : `The profile holds ${plural(a.sessions, 'session')} and its signed-in account.`,
-    buttons: a.isDefault
-      ? ['Remove from list']
-      : ['Remove from list', 'Delete everything…']
+      ? 'This is Claude’s own profile, so its data cannot be moved or deleted — it can only leave this list.'
+      : `The profile is ${fmtBytes(bytes)} and holds ${plural(a.sessions, 'session')}.`,
+    rows,
+    selected: 'forget',
+    ok: 'Continue'
   })
-  if (choice < 0) return
+  if (picked === undefined || picked === null) return
 
-  const deleteData = !a.isDefault && choice === 1
-  const res = await window.api.remove(a.id, deleteData)
+  const res = picked === 'archive'
+    ? await window.api.archiveAccount(a.id)
+    : await window.api.remove(a.id, picked === 'delete')
+
   if (res.cancelled) return
   if (res.error) return showBanner(res.error)
-  accounts = res.accounts
+  accounts = mergeStatus(res.accounts)
+  if (res.archived) archived = res.archived
+  if (res.movedTo) showBanner(`“${a.name}” moved aside to ${res.movedTo}. Nothing was deleted.`, 'info')
   renderPicker()
+  renderArchived()
+  pullStatus()
+}
+
+// -------------------------------------------------------------- archives ---
+
+function renderArchived () {
+  const note = $('#archived-note')
+  const on = archived.length > 0
+  note.hidden = !on
+  setExtra('archived', on ? ARCHIVED_NOTE_PX : 0)
+  if (!on) return
+
+  const total = archived.reduce((n, r) => n + (Number.isFinite(r.bytes) ? r.bytes : 0), 0)
+  const missing = archived.filter(r => !r.exists).length
+  $('#archived-text').textContent =
+    `${plural(archived.length, 'archived profile')}` +
+    (total ? ` · ${fmtBytes(total)}` : '') +
+    (missing ? ` · ${missing} folder${missing === 1 ? '' : 's'} missing` : '')
+}
+
+async function doArchived () {
+  const rows = archived.map(r => ({
+    value: r.id,
+    name: r.name,
+    badge: r.emoji || initials(r.name),
+    color: Number.isFinite(r.hue) ? hueColor(r.hue) : avatarColor(r.name),
+    tag: r.exists ? null : 'folder missing',
+    sub: [
+      r.exists ? fmtBytes(r.bytes) : 'the folder is no longer there',
+      r.archivedAt ? `archived ${fmtAgo(r.archivedAt)}` : null,
+      r.dir.replace(/^.*Application Support\//, '')
+    ].filter(Boolean).join(' · ')
+  }))
+
+  const picked = await listModal({
+    title: 'Archived profiles',
+    note: 'Restoring moves the folder back and adds the account to your list again.',
+    rows,
+    selected: rows[0]?.value || null,
+    ok: 'Restore',
+    extra: { label: 'Delete…', value: 'delete', danger: true }
+  })
+  if (picked === undefined || picked === null) return
+
+  const isDelete = typeof picked === 'object' && picked.extra
+  const id = isDelete ? picked.value : picked
+  if (!id) return
+
+  const res = isDelete ? await window.api.archiveDelete(id) : await window.api.archiveRestore(id)
+  if (res.cancelled) return
+  if (res.error) return showBanner(res.error)
+
+  archived = res.archived
+  if (res.accounts) accounts = mergeStatus(res.accounts)
+  if (res.renamed) {
+    showBanner(`Restored, but its old folder was taken — it went to ${res.renamed.replace(/^.*\//, '')}.`, 'info')
+  }
+  renderPicker()
+  renderArchived()
+  pullStatus()
 }
 
 async function doAdd () {
@@ -507,6 +638,7 @@ async function finishSetup (picked) {
 // -------------------------------------------------------------------- init ---
 
 $('#add').addEventListener('click', doAdd)
+$('#archived-open').addEventListener('click', doArchived)
 
 $('#setup-continue').addEventListener('click', () => {
   const picked = discovered
@@ -713,7 +845,7 @@ function listModal ({ title, note = '', rows, selected = null, ok = 'Save', extr
         <div class="swatch">${esc(r.badge || '')}</div>
         <div class="row-body">
           <div class="row-name">${esc(r.name)}${r.tag ? `<span class="tag${r.tagMuted ? ' muted' : ''}">${esc(r.tag)}</span>` : ''}</div>
-          ${r.sub ? `<div class="row-sub">${esc(r.sub)}</div>` : ''}
+          ${r.sub ? `<div class="row-sub${r.wrap ? ' wrap' : ''}">${esc(r.sub)}</div>` : ''}
         </div>`
       el.querySelector('.swatch').style.background = r.color || 'var(--border-strong)'
       el.addEventListener('click', () => {
@@ -732,9 +864,14 @@ function listModal ({ title, note = '', rows, selected = null, ok = 'Save', extr
     cancel.onclick = () => done(undefined)
     modal.actions.append(cancel)
 
+    // The extra button is a second verb on the same selection, so it has to
+    // carry the selected row with it, not just announce that it was pressed.
     if (extra) {
-      const b = Object.assign(document.createElement('button'), { className: 'btn ghost', textContent: extra.label })
-      b.onclick = () => done(extra.value)
+      const b = Object.assign(document.createElement('button'), {
+        className: 'btn ' + (extra.danger ? 'ghost danger' : 'ghost'),
+        textContent: extra.label
+      })
+      b.onclick = () => done({ extra: true, value: choice })
       modal.actions.append(b)
     }
 
@@ -877,11 +1014,9 @@ async function doQuit (a) {
 
 // ---------------------------------------------------------- keep in dock ---
 
-const PIN_NOTE_PX = 68
-
 function setPinNote (show) {
   $('#pin-note').hidden = !show
-  window.api.extraHeight(show ? PIN_NOTE_PX : 0)
+  setExtra('pin', show ? PIN_NOTE_PX : 0)
 }
 
 async function refreshPinNote () {

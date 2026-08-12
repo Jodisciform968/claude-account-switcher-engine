@@ -33,6 +33,12 @@ recently used** moves the last one you used to the top, taking `⌘1`–`⌘9` w
 it. That is off by default, because with two accounts the order would flip on
 every switch.
 
+The trash button offers three things, not one: **remove from the list** (nothing
+on disk changes), **archive**, or **delete everything**. Archiving renames the
+profile folder aside — instant whatever its size, since nothing is copied — and
+a banner offers it back. Each option shows what it costs; profiles here run from
+0.5 to 8.4 GB, so the difference is worth seeing before you choose.
+
 The bar along the bottom of a card is **plan usage** — whichever of the
 five-hour and weekly limits is further along, turning amber past 75% and red
 past 90%. Hover for both figures. Claude records this itself every five minutes

@@ -8,6 +8,7 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const health = require('./health')
 const usage = require('./usage')
+const archive = require('./archive')
 const chrome = require('./chrome')
 const macos = require('./macos')
 const tray = require('./tray')
@@ -76,13 +77,21 @@ function readSettings () {
   return { ...DEFAULT_SETTINGS, ...(readRaw().settings || {}) }
 }
 
-function writeConfig (accounts, settings) {
+function readArchived () {
+  const raw = readRaw()
+  return Array.isArray(raw.archived) ? raw.archived : []
+}
+
+function writeConfig (accounts, settings, archived) {
   fs.mkdirSync(CONF_DIR, { recursive: true })
   const raw = readRaw()
   const next = {
     version: 2,
     accounts: accounts || raw.accounts || [],
-    settings: settings || raw.settings || DEFAULT_SETTINGS
+    settings: settings || raw.settings || DEFAULT_SETTINGS,
+    // Carried explicitly: this writer replaces the file wholesale, so anything
+    // not named here would be dropped on the next unrelated save.
+    archived: archived || raw.archived || []
   }
   const tmp = `${CONF}.tmp`
   fs.writeFileSync(tmp, JSON.stringify(next, null, 2))
@@ -96,6 +105,11 @@ function writeConfig (accounts, settings) {
 function sortAccounts (list) {
   if (!readSettings().sortByRecent) return list
   return [...list].sort((a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0))
+}
+
+/** Config order and flags only — no probing, so it returns immediately. */
+function storedList (accounts) {
+  return sortAccounts(accounts).map(a => ({ ...a, isDefault: a.dir === DEFAULT_PROFILE }))
 }
 
 /** Stamp an account as just used. Activating a running one counts. */
@@ -118,6 +132,9 @@ function discoverProfiles () {
   for (const e of entries) {
     if (!e.isDirectory() || !e.name.startsWith('Claude-')) continue
     if (e.name === 'ClaudeAccounts') continue
+    // An archived profile is deliberately set aside; offering it back here
+    // would undo the archive by accident.
+    if (archive.isArchivePath(e.name)) continue
     found.push({ name: e.name.slice('Claude-'.length), dir: path.join(SUPPORT, e.name), isDefault: false })
   }
   return found
@@ -216,6 +233,26 @@ function uniqueDir (name) {
   return dir
 }
 
+/** A name not already taken, for restoring an archive alongside a namesake. */
+function freeName (name, accounts) {
+  const taken = new Set(accounts.map(a => a.name.toLowerCase()))
+  if (!taken.has(String(name).toLowerCase())) return name
+  for (let i = 2; ; i++) {
+    const candidate = `${name} ${i}`
+    if (!taken.has(candidate.toLowerCase())) return candidate
+  }
+}
+
+/** Decimal units, to match what Finder reports for the same folder. */
+function fmtBytes (bytes) {
+  if (!Number.isFinite(bytes)) return 'an unknown amount'
+  const units = ['bytes', 'KB', 'MB', 'GB', 'TB']
+  let n = bytes
+  let i = 0
+  while (n >= 1000 && i < units.length - 1) { n /= 1000; i++ }
+  return `${i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`
+}
+
 // --------------------------------------------------------------------- IPC ---
 
 function currentAccounts () { return readConfig() || [] }
@@ -238,7 +275,8 @@ ipcMain.handle('accounts:list', async () => {
     needsSetup: false,
     discovered: [],
     accounts: sortAccounts(stored).map(a => ({ ...a, isDefault: a.dir === DEFAULT_PROFILE })),
-    chromeProfiles: chrome.listProfiles()
+    chromeProfiles: chrome.listProfiles(),
+    archived: archive.withStatus(readArchived())
   }
 })
 
@@ -308,7 +346,7 @@ ipcMain.handle('accounts:update', async (_e, { id, name, emoji, hue }) => {
   tray.refresh()
   // Deliberately not decorate(): its lsof probes would put two seconds between
   // pressing Save and seeing the new name. The renderer keeps the status it has.
-  return { accounts: sortAccounts(accounts).map(x => ({ ...x, isDefault: x.dir === DEFAULT_PROFILE })) }
+  return { accounts: storedList(accounts) }
 })
 
 ipcMain.handle('accounts:remove', async (_e, { id, deleteData }) => {
@@ -344,6 +382,97 @@ ipcMain.handle('accounts:remove', async (_e, { id, deleteData }) => {
   fitWindow()
   tray.refresh()
   return { accounts: sortAccounts(await decorate(next)) }
+})
+
+// ------------------------------------------------------------- lifecycle ---
+
+ipcMain.handle('accounts:size', async (_e, id) => {
+  const a = currentAccounts().find(x => x.id === id)
+  return { bytes: a ? await archive.size(a.dir) : null }
+})
+
+ipcMain.handle('accounts:archive', async (_e, id) => {
+  const accounts = currentAccounts()
+  const a = accounts.find(x => x.id === id)
+  if (!a) return { error: 'Account not found.' }
+  if (a.dir === DEFAULT_PROFILE) {
+    return { error: 'The default profile is Claude’s own data directory and cannot be moved aside.' }
+  }
+  // Renaming a directory out from under a running app is how you corrupt one.
+  if (await isRunning(a.dir)) {
+    return { error: 'That account is open. Quit it first, then try again.' }
+  }
+
+  // No second confirmation: archiving deletes nothing and restores in a click,
+  // and the picker's own menu already spelled out what it does. The native
+  // warnings are kept for the two paths that cannot be undone.
+  const bytes = await archive.size(a.dir)
+  const res = archive.archive(a, bytes)
+  if (res.error) return res
+
+  const next = accounts.filter(x => x.id !== id)
+  writeConfig(next, null, [...readArchived(), res.record])
+  fitWindow()
+  tray.refresh()
+  // Undecorated for the same reason as the edit path: lsof would sit between
+  // the click and the list updating. The renderer polls status right after.
+  return {
+    accounts: storedList(next),
+    archived: archive.withStatus(readArchived()),
+    movedTo: path.basename(res.record.dir)
+  }
+})
+
+ipcMain.handle('archive:restore', async (_e, id) => {
+  const records = readArchived()
+  const r = records.find(x => x.id === id)
+  if (!r) return { error: 'That archive is no longer listed.' }
+
+  const res = archive.restore(r)
+  if (res.error) return res
+
+  const accounts = currentAccounts()
+  // A fresh id: the archived one may since have been reused by a new account.
+  accounts.push({
+    id: crypto.randomUUID(),
+    name: freeName(r.name, accounts),
+    dir: res.dir,
+    ...(r.emoji ? { emoji: r.emoji } : {}),
+    ...(Number.isFinite(r.hue) ? { hue: r.hue } : {}),
+    ...(r.chrome ? { chrome: r.chrome } : {})
+  })
+  writeConfig(accounts, null, records.filter(x => x.id !== id))
+  fitWindow()
+  tray.refresh()
+  return {
+    accounts: storedList(accounts),
+    archived: archive.withStatus(readArchived()),
+    renamed: res.renamed ? res.dir : null
+  }
+})
+
+ipcMain.handle('archive:delete', async (_e, id) => {
+  const records = readArchived()
+  const r = records.find(x => x.id === id)
+  if (!r) return { error: 'That archive is no longer listed.' }
+
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'warning',
+    buttons: ['Cancel', 'Delete Permanently'],
+    defaultId: 0,
+    cancelId: 0,
+    message: `Delete the archive of “${r.name}”?`,
+    detail:
+      `This erases ${fmtBytes(r.bytes)} — the profile folder and everything in it, ` +
+      `including its signed-in account. It cannot be undone.\n\n` +
+      `Your ~/.claude data — skills, plugins, settings and transcripts — is not affected.\n\n${r.dir}`
+  })
+  if (response !== 1) return { cancelled: true }
+
+  const res = archive.destroy(r)
+  if (res.error) return res
+  writeConfig(null, null, records.filter(x => x.id !== id))
+  return { archived: archive.withStatus(readArchived()) }
 })
 
 ipcMain.handle('accounts:launch', async (_e, id) => {
